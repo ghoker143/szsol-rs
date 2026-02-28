@@ -1,6 +1,8 @@
+use serde::{Serialize, Deserialize};
+
 /// Suits used in SHENZHEN I/O Solitaire.
 /// There are three suits: Red (红), Green (绿), Black (黑).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Suit {
     Red,
     Green,
@@ -31,7 +33,7 @@ impl Suit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Card {
     /// A numbered card, value is 1..=9.
     Numbered(Suit, u8),

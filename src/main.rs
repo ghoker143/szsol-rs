@@ -2,9 +2,9 @@ mod board;
 mod card;
 mod command;
 mod game;
+mod history;
 mod renderer;
 
-use board::Board;
 use game::Game;
 use renderer::CliRenderer;
 
@@ -23,15 +23,7 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok());
 
-    let board = match seed {
-        Some(s) => {
-            println!("Using seed: {}", s);
-            Board::deal_seeded(s)
-        }
-        None => Board::deal_random(),
-    };
-
     let renderer = CliRenderer::new();
-    let mut game = Game::new(board, renderer);
+    let mut game = Game::init(seed, renderer);
     game.run();
 }

@@ -1,5 +1,6 @@
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use serde::{Serialize, Deserialize};
 
 use crate::card::{Card, Suit, full_deck};
 
@@ -14,7 +15,7 @@ pub const NUM_FOUNDATIONS: usize = 3;
 /// - Empty
 /// - Holding a single card temporarily
 /// - Locked by a set of four dragons
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FreeCellState {
     Empty,
     Card(Card),
@@ -44,7 +45,7 @@ pub enum Location {
 }
 
 /// The game board – the single source of truth for all game state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Board {
     /// 8 tableau columns; index 0 is leftmost.
     pub columns: [Vec<Card>; NUM_COLUMNS],
