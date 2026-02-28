@@ -1,0 +1,14 @@
+[package]
+name = "szsol-rs"
+version = "0.1.0"
+edition = "2024"
+description = "SHENZHEN I/O Solitaire – CLI clone in Rust"
+
+[dependencies]
+rand = "0.9"
+
+[dev-dependencies]
+
+[[bin]]
+name = "szsol"
+path = "src/main.rs"
