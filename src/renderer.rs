@@ -68,7 +68,7 @@ impl Renderer for CliRenderer {
         use crate::card::Suit;
 
         println!();
-
+        println!("\n  Seed: {}", board.seed);
         // ---- Top row: free cells | flower | foundations ----
         // Free cells (0–2)
         print!("  FREE CELLS:  ");

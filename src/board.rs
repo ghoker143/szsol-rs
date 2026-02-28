@@ -54,6 +54,8 @@ pub struct Board {
     pub foundations: [u8; NUM_FOUNDATIONS],
     /// Whether the flower slot is occupied.
     pub flower_placed: bool,
+    /// The random seed used to generate this board.
+    pub seed: u64,
 }
 
 /// Maps a `Suit` to its foundation/free-cell array index.
@@ -72,10 +74,9 @@ impl Board {
 
     /// Deal a fresh shuffled board using a random seed.
     pub fn deal_random() -> Self {
-        let mut rng = rand::rngs::SmallRng::from_os_rng();
-        let mut deck = full_deck();
-        deck.shuffle(&mut rng);
-        Self::deal_from_deck(deck)
+        // Use OS rng just to pick a random `u64` seed, then use that seed
+        let seed = rand::random::<u64>();
+        Self::deal_seeded(seed)
     }
 
     /// Deal a board from a specific seed (useful for reproducible games).
@@ -83,11 +84,11 @@ impl Board {
         let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
         let mut deck = full_deck();
         deck.shuffle(&mut rng);
-        Self::deal_from_deck(deck)
+        Self::deal_from_deck(deck, seed)
     }
 
     /// Deal a board from an already-ordered deck slice (for testing).
-    pub fn deal_from_deck(deck: Vec<Card>) -> Self {
+    pub fn deal_from_deck(deck: Vec<Card>, seed: u64) -> Self {
         assert_eq!(deck.len(), 40, "Need exactly 40 cards to deal");
 
         // Distribute 40 cards across 8 columns: 5 columns get 5 cards, 3 get 4.
@@ -107,6 +108,7 @@ impl Board {
             ],
             foundations: [0; NUM_FOUNDATIONS],
             flower_placed: false,
+            seed,
         }
     }
 
