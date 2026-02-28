@@ -14,6 +14,8 @@ pub trait Renderer {
     fn help(&mut self);
     /// Display the win screen.
     fn win(&mut self);
+    /// Display the active dynamic dashboard with titles.
+    fn render_header(&mut self, total_wins: usize, seed: u64);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +142,57 @@ impl Renderer for CliRenderer {
         println!("\x1b[31m[ERR ]\x1b[0m {}", msg);
     }
 
+    fn render_header(&mut self, total_wins: usize, seed: u64) {
+        let title = if total_wins == 0 {
+             "【来面试的】"
+        } else if total_wins < 10 {
+             "【带薪如厕生】"
+        } else if total_wins < 25 {
+             "【划水工程师】"
+        } else if total_wins < 50 {
+             "【工位地缚灵】"
+        } else if total_wins < 100 {
+             "【需求粉碎机】"
+        } else {
+             "【摸鱼仙人】"
+        };
+        
+        // Inner width of the ASCII box is 52 characters
+        // Line 1: `    Wins: 0000 |  Seed: 12345678901234567890`
+        let wins_str = format!("{:<4}", total_wins);
+        let seed_str = format!("{:<20}", seed);
+        
+        let rank_str = format!("Rank: {}", title);
+        // Calculate display width: English/spaces = 1, Chinese = 2
+        // "Rank: " is 6 chars. Title is full-width (each char is 2 wide)
+        let rank_display_width = 6 + title.chars().count() * 2;
+        let rank_padding = 52 - 4 - rank_display_width; 
+
+        if total_wins < 100 {
+            println!(
+                "\n┌────────────────────────────────────────────────────┐\n\
+                 │           SHENZHEN I/O: SOLITAIRE                  │\n\
+                 │    Wins: {} |  Seed: {}        │\n\
+                 │    {}{}│\n\
+                 └────────────────────────────────────────────────────┘",
+                wins_str, seed_str, rank_str, " ".repeat(rank_padding)
+            );
+        } else {
+            let padding = " ".repeat(40_usize.saturating_sub(rank_display_width) / 2);
+            println!(
+                "\n\x1b[32m\
+                 /// KERNEL PANIC: TOO MUCH FREE TIME ///\n\
+                 ========================================\n\
+                     [!] EMPLOYEE OF THE MONTH [!]\n\
+                 Wins: {:<4} | Seed: {:<15}\n\
+                 {}{}\n\
+                 ========================================\
+                 \x1b[0m",
+                 total_wins, seed, padding, rank_str
+            );
+        }
+    }
+
     fn help(&mut self) {
         println!(
             r#"
@@ -155,9 +208,9 @@ impl Renderer for CliRenderer {
 ║                                                              ║
 ║  RULES:                                                      ║
 ║    · Stack cards on columns: different suit, value - 1       ║
-║      e.g. R5 can go on G6 or B6, but not R6                 ║
-║    · Foundation builds up by suit: R1 → R2 → ... → R9       ║
-║    · 3 Free Cells: each holds 1 card temporarily            ║
+║      e.g. R5 can go on G6 or B6, but not R6                  ║
+║    · Foundation builds up by suit: R1 → R2 → ... → R9        ║
+║    · 3 Free Cells: each holds 1 card temporarily             ║
 ║    · Flower card goes to the flower slot (auto if exposed)   ║
 ║    · 4 same-color Dragons can be merged when all exposed     ║
 ║      (locks one free cell permanently)                       ║
@@ -177,7 +230,7 @@ impl Renderer for CliRenderer {
 ║  quit                    Exit                                ║
 ║  help | h | ?            Show this help                      ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Example: cc 4:2 7  →  move top 3 cards of col 4 to col 7   ║
+║  Example: cc 4:2 7  →  move top 3 cards of col 4 to col 7    ║
 ║                                                              ║
 ║  * Safe cards are moved to foundation automatically.         ║
 ╚══════════════════════════════════════════════════════════════╝

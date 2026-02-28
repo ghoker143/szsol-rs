@@ -93,6 +93,7 @@ impl<R: Renderer> Game<R> {
         if n > 0 {
             self.renderer.info(&format!("Auto-moved {} card(s) to foundation.", n));
         }
+        self.renderer.render_header(self.save_data.total_wins(), self.board.seed);
         self.renderer.render(&self.board);
 
         loop {
@@ -135,10 +136,12 @@ impl<R: Renderer> Game<R> {
                         self.record_win();
                         self.renderer.win();
                         // Handle post-win input (like typing "new" to deal another hand)
+                        self.renderer.render_header(self.save_data.total_wins(), self.board.seed);
                         self.renderer.render(&self.board);
                         continue;
                     }
 
+                    self.renderer.render_header(self.save_data.total_wins(), self.board.seed);
                     self.renderer.render(&self.board);
                 }
             }

@@ -46,6 +46,10 @@ pub struct History {
 }
 
 impl History {
+    pub fn total_wins(&self) -> usize {
+        self.records.iter().filter(|r| r.won).count()
+    }
+
     /// Load the history from disk. If the file doesn't exist or is corrupted/tampered,
     /// returns an empty new History to avoid crashing the game.
     pub fn load() -> Self {
