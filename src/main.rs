@@ -1,3 +1,4 @@
+mod solver;
 mod board;
 mod card;
 mod command;

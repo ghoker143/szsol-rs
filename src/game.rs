@@ -221,6 +221,18 @@ impl<R: Renderer> Game<R> {
                     self.renderer.error("Nothing to undo.");
                 }
             }
+            Command::Solve => {
+                self.renderer.info("Solving with BFS... (This may take a minute)");
+                
+                if let Some(path) = crate::solver::solve_bfs(&self.board) {
+                    self.renderer.info(&format!("Found a solution in {} steps!", path.len()));
+                    for (i, m) in path.iter().enumerate() {
+                        self.renderer.info(&format!("{:4}. {}", i + 1, m.to_command_str()));
+                    }
+                } else {
+                    self.renderer.error("No solution found by BFS.");
+                }
+            }
             Command::ColumnToColumn { src, stack_start, dst } => {
                 self.save_history();
                 let col_len = self.board.columns[src].len();

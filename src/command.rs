@@ -21,6 +21,8 @@ pub enum Command {
     MergeDragons { suit: crate::card::Suit },
     /// Undo the last move (optional, not yet implemented).
     Undo,
+    /// Run the solver.
+    Solve,
     /// Quit the game.
     Quit,
     /// Give up and start a new game.
@@ -41,6 +43,7 @@ pub enum Command {
 /// ftf <cell_idx>                    -- Move free cell → foundation
 /// dragon r|g|b                      -- Merge dragons of a suit
 /// undo                              -- Undo last move
+/// solve                             -- Run solver (BFS)
 /// new                               -- New game
 /// quit | q                          -- Quit
 /// help | h | ?                      -- Help
@@ -109,6 +112,7 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         }
 
         "undo" | "u" => Ok(Command::Undo),
+        "solve" => Ok(Command::Solve),
         "new" | "n" => Ok(Command::NewGame),
         "quit" | "q" | "exit" => Ok(Command::Quit),
         "help" | "h" | "?" => Ok(Command::Help),

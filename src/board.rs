@@ -15,7 +15,7 @@ pub const NUM_FOUNDATIONS: usize = 3;
 /// - Empty
 /// - Holding a single card temporarily
 /// - Locked by a set of four dragons
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FreeCellState {
     Empty,
     Card(Card),
@@ -45,7 +45,7 @@ pub enum Location {
 }
 
 /// The game board – the single source of truth for all game state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Board {
     /// 8 tableau columns; index 0 is leftmost.
     pub columns: [Vec<Card>; NUM_COLUMNS],
