@@ -1,3 +1,25 @@
+/*
+ * szsol-rs
+ * Copyright (C) 2026 ghoker143
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * RELICENSING NOTICE:
+ * This project was originally released under the MIT License. As of March 2026, 
+ * the sole copyright holder (ghoker143) has officially transitioned the 
+ * entire project and its history to the GNU General Public License v3.0.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 use std::collections::HashSet;
 
 use crate::board::{Board, Location, NUM_COLUMNS, NUM_FREE_CELLS};
@@ -142,14 +164,15 @@ impl Board {
                 let abs_idx = col_len - 1 - depth_from_top;
                 self.move_stack(src, abs_idx, dst).unwrap();
             }
-            SolverMove::ColToFree { src, dst } => self.move_card(Location::Column(src), Location::FreeCell(dst)).unwrap(),
-            SolverMove::FreeToCol { src, dst } => self.move_card(Location::FreeCell(src), Location::Column(dst)).unwrap(),
-            SolverMove::ColToFound { src } => self.move_to_foundation(Location::Column(src)).unwrap(),
-            SolverMove::FreeToFound { src } => self.move_to_foundation(Location::FreeCell(src)).unwrap(),
+            SolverMove::ColToFree { src, dst } => { self.move_card(Location::Column(src), Location::FreeCell(dst)).unwrap(); }
+            SolverMove::FreeToCol { src, dst } => { self.move_card(Location::FreeCell(src), Location::Column(dst)).unwrap(); }
+            SolverMove::ColToFound { src } => { self.move_to_foundation(Location::Column(src)).unwrap(); }
+            SolverMove::FreeToFound { src } => { self.move_to_foundation(Location::FreeCell(src)).unwrap(); }
             SolverMove::Merge { suit } => { self.merge_dragons(suit).unwrap(); }
         }
         // Always trigger safe auto-moves after any manual legal move
-        self.auto_move();
+        let _ = self.auto_move();
+
     }
 }
 
@@ -260,16 +283,18 @@ impl Ord for SearchNode {
 // A* solver
 // ---------------------------------------------------------------------------
 
-/// A* pathfinding solver (replaces the old BFS).
+/// A* pathfinding solver.
 ///
 /// Uses `heuristic()` to guide the search toward promising states first.
 /// The `visited` HashSet prevents re-exploring the same board position.
-pub fn solve_bfs(initial_board: &Board) -> Option<Vec<SolverMove>> {
+/// Gives up after `NODE_LIMIT` nodes to keep the game responsive.
+pub fn solve(initial_board: &Board) -> Option<Vec<SolverMove>> {
     let mut heap: BinaryHeap<SearchNode> = BinaryHeap::new();
     let mut visited: HashSet<Board> = HashSet::new();
 
     let mut start = initial_board.clone();
-    start.auto_move();
+    let _ = start.auto_move();
+
 
     let h0 = heuristic(&start);
     heap.push(SearchNode { neg_f: h0, g: 0, board: start.clone(), path: Vec::new() });

@@ -1,8 +1,31 @@
+/*
+ * szsol-rs
+ * Copyright (C) 2026 ghoker143
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * RELICENSING NOTICE:
+ * This project was originally released under the MIT License. As of March 2026, 
+ * the sole copyright holder (ghoker143) has officially transitioned the 
+ * entire project and its history to the GNU General Public License v3.0.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use serde::{Serialize, Deserialize};
 
 use crate::card::{Card, Suit, full_deck};
+use crate::event::GameEvent;
 
 /// Number of tableau columns.
 pub const NUM_COLUMNS: usize = 8;
@@ -35,14 +58,24 @@ impl FreeCellState {
     }
 }
 
-/// Source location for a card during a move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Unified slot address used both for move operations and for events.
+///
+/// `Column` and `FreeCell` are valid sources *and* destinations for hand
+/// moves.  `Foundation` and `Flower` only appear as destinations (in events
+/// and in `move_to_foundation`); passing them as a source to `move_card`
+/// will return `Err`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Location {
-    /// The top card of a tableau column (0-indexed).
+    /// A tableau column (0-indexed).
     Column(usize),
     /// A free-cell slot (0-indexed).
     FreeCell(usize),
+    /// A foundation pile, keyed by suit.
+    Foundation(Suit),
+    /// The single flower slot.
+    Flower,
 }
+
 
 /// The game board – the single source of truth for all game state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -92,9 +125,7 @@ impl Board {
     pub fn deal_from_deck(deck: Vec<Card>, seed: u64) -> Self {
         assert_eq!(deck.len(), 40, "Need exactly 40 cards to deal");
 
-        // Distribute 40 cards across 8 columns: 5 columns get 5 cards, 3 get 4.
-        // (5×5 + 3×4 = 25+12 = 37 -- No, that's wrong. 8*5=40, deal 5 each)
-        // Actually: 40 / 8 = 5 cards per column.
+        // Distribute 40 cards across 8 columns: 5 cards per column.
         let mut columns: [Vec<Card>; NUM_COLUMNS] = Default::default();
         for (i, card) in deck.into_iter().enumerate() {
             columns[i % NUM_COLUMNS].push(card);
@@ -134,12 +165,15 @@ impl Board {
     }
 
     /// The card that *lives* at a given `Location` (top of column or free cell).
+    /// Returns `None` for `Foundation`/`Flower` slots (content tracked separately).
     pub fn card_at(&self, loc: Location) -> Option<Card> {
         match loc {
             Location::Column(c) => self.column_top(c),
             Location::FreeCell(f) => self.free_cell_card(f),
+            Location::Foundation(_) | Location::Flower => None,
         }
     }
+
 
     // -------------------------------------------------------------------------
     // Move Validation
@@ -158,8 +192,8 @@ impl Board {
                 self.free_cells[f].is_empty()
             }
             Location::Column(c) => {
-                if c == match src { Location::Column(sc) => sc, _ => usize::MAX } {
-                    return false; // same column
+                if let Location::Column(sc) = src {
+                    if sc == c { return false; } // same column
                 }
                 match self.column_top(c) {
                     // Empty column: any card is accepted
@@ -168,8 +202,11 @@ impl Board {
                     Some(top) => card.can_stack_on(top),
                 }
             }
+            // Foundation/Flower are not valid dst for move_card
+            Location::Foundation(_) | Location::Flower => false,
         }
     }
+
 
     /// Can the top card of `src` be moved to the foundation?
     pub fn can_move_to_foundation(&self, src: Location) -> bool {
@@ -188,18 +225,20 @@ impl Board {
 
     /// Move the top card from `src` to `dst` in the tableau / free cells.
     /// Returns `Err(reason)` if the move is illegal.
-    pub fn move_card(&mut self, src: Location, dst: Location) -> Result<(), &'static str> {
+    pub fn move_card(&mut self, src: Location, dst: Location) -> Result<Vec<GameEvent>, &'static str> {
         if !self.can_move(src, dst) {
             return Err("Illegal move");
         }
 
         let card = self.take_card(src).unwrap();
         self.place_card(dst, card);
-        Ok(())
+        // Stub: events will be populated when animation support is added.
+        Ok(vec![])
     }
 
+
     /// Move the top card from `src` to the appropriate foundation / flower slot.
-    pub fn move_to_foundation(&mut self, src: Location) -> Result<(), &'static str> {
+    pub fn move_to_foundation(&mut self, src: Location) -> Result<Vec<GameEvent>, &'static str> {
         if !self.can_move_to_foundation(src) {
             return Err("Card cannot go to foundation yet");
         }
@@ -214,8 +253,10 @@ impl Board {
             }
             _ => unreachable!(),
         }
-        Ok(())
+        // Stub: events will be populated when animation support is added.
+        Ok(vec![])
     }
+
 
     /// Check whether all four dragons of `suit` are exposed (top of column or
     /// in a free cell) and therefore the merge can be performed.
@@ -260,7 +301,7 @@ impl Board {
 
     /// Merge all four exposed dragons of `suit` into a single locked free cell.
     /// Returns `Err` if the merge is not currently possible.
-    pub fn merge_dragons(&mut self, suit: Suit) -> Result<(), &'static str> {
+    pub fn merge_dragons(&mut self, suit: Suit) -> Result<Vec<GameEvent>, &'static str> {
         if !self.can_merge_dragons(suit) {
             return Err("Cannot merge dragons: not all four are exposed or no free cell");
         }
@@ -288,20 +329,23 @@ impl Board {
             .expect("We verified a free slot exists");
         *slot = FreeCellState::DragonLocked(suit);
 
-        Ok(())
+        // Stub: events will be populated when animation support is added.
+        Ok(vec![])
     }
+
 
     // -------------------------------------------------------------------------
     // Auto-Move
     // -------------------------------------------------------------------------
 
     /// Automatically move the flower card and any numbered cards that are safely
-    /// auto-playable to the foundation.  Returns the number of cards moved.
+    /// auto-playable to the foundation.  Returns the number of cards moved and
+    /// a (currently empty) event list as a stub for future animation support.
     ///
     /// A numbered card is "safe" to auto-move when every suit has at least
     /// `value - 1` in its foundation (so we'll never need that card to build
     /// on), matching the original game's heuristic.
-    pub fn auto_move(&mut self) -> usize {
+    pub fn auto_move(&mut self) -> (usize, Vec<GameEvent>) {
         let mut moved = 0;
 
         // Iterate until no more moves are possible in one pass.
@@ -326,8 +370,10 @@ impl Board {
             }
         }
 
-        moved
+        // Stub: events will be populated when animation support is added.
+        (moved, vec![])
     }
+
 
     /// A card is safe to auto-move to foundation when it's the flower OR when
     /// its foundation value is ≤ min(all_foundations) + 1.  This prevents
@@ -442,6 +488,8 @@ impl Board {
                 }
                 card
             }
+            // Foundation/Flower are write-only destinations; never take from them.
+            Location::Foundation(_) | Location::Flower => None,
         }
     }
 
@@ -451,6 +499,11 @@ impl Board {
             Location::FreeCell(f) => {
                 self.free_cells[f] = FreeCellState::Card(card);
             }
+            // Placing to Foundation/Flower is handled by move_to_foundation, not here.
+            Location::Foundation(_) | Location::Flower => {
+                panic!("place_card called with Foundation/Flower; use move_to_foundation instead");
+            }
         }
     }
 }
+

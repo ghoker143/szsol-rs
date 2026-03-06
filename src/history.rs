@@ -1,3 +1,25 @@
+/*
+ * szsol-rs
+ * Copyright (C) 2026 ghoker143
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * RELICENSING NOTICE:
+ * This project was originally released under the MIT License. As of March 2026, 
+ * the sole copyright holder (ghoker143) has officially transitioned the 
+ * entire project and its history to the GNU General Public License v3.0.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -10,6 +32,10 @@ use crate::board::Board;
 
 type HmacSha256 = Hmac<Sha256>;
 
+// NOTE: This HMAC is not a security measure against a determined attacker.
+// The key being in the binary is intentional: this is a single-player game with
+// no secrets at stake. The sole purpose is to detect accidental file corruption
+// (e.g. from a crash mid-write) so we never silently load a broken save.
 const SECRET_KEY: &[u8] = b"szsol_secret_key_123_do_not_cheat";
 const HMAC_SIZE: usize = 32;
 

@@ -1,3 +1,25 @@
+/*
+ * szsol-rs
+ * Copyright (C) 2026 ghoker143
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * RELICENSING NOTICE:
+ * This project was originally released under the MIT License. As of March 2026, 
+ * the sole copyright holder (ghoker143) has officially transitioned the 
+ * entire project and its history to the GNU General Public License v3.0.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 /// Trait that abstracts the rendering layer.
 ///
 /// Implement this trait for:
@@ -16,7 +38,15 @@ pub trait Renderer {
     fn win(&mut self);
     /// Display the active dynamic dashboard with titles.
     fn render_header(&mut self, total_wins: usize, seed: u64);
+
+    /// Deliver events produced by board mutations to the renderer.
+    /// The default no-op is used by `CliRenderer` (events are never animated).
+    fn push_events(&mut self, _events: Vec<crate::event::GameEvent>) {}
+
+    fn tick(&mut self) {}
+
 }
+
 
 // ---------------------------------------------------------------------------
 // CLI Renderer
@@ -156,8 +186,6 @@ impl Renderer for CliRenderer {
         } else {
              "【摸鱼仙人】"
         };
-        
-        // Inner width of the ASCII box is 52 characters
         // Line 1: `    Wins: 0000 |  Seed: 12345678901234567890`
         let wins_str = format!("{:<4}", total_wins);
         let seed_str = format!("{:<20}", seed);
@@ -166,7 +194,7 @@ impl Renderer for CliRenderer {
         // Calculate display width: English/spaces = 1, Chinese = 2
         // "Rank: " is 6 chars. Title is full-width (each char is 2 wide)
         let rank_display_width = 6 + title.chars().count() * 2;
-        let rank_padding = 52 - 4 - rank_display_width; 
+        let rank_padding = 52usize.saturating_sub(4 + rank_display_width); 
 
         if total_wins < 100 {
             println!(
@@ -226,6 +254,7 @@ impl Renderer for CliRenderer {
 ║  ftf <cell>              Move card: free cell → foundation   ║
 ║  dragon r|g|b            Merge all 4 exposed dragons         ║
 ║  undo                    Undo last move                      ║
+║  solve                   Run A* solver (suggest moves)       ║
 ║  new                     Start a new random game             ║
 ║  quit                    Exit                                ║
 ║  help | h | ?            Show this help                      ║
