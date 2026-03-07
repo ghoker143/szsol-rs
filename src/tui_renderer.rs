@@ -41,6 +41,7 @@ use crate::board::{Board, FreeCellState, Location, NUM_COLUMNS, NUM_FREE_CELLS};
 use crate::card::{Card, Suit};
 use crate::event::GameEvent;
 use crate::renderer::Renderer;
+use crate::solver::SolverMove;
 
 // ---------------------------------------------------------------------------
 // Key bindings
@@ -179,6 +180,45 @@ pub enum SelectionState {
 }
 
 // ---------------------------------------------------------------------------
+// Hint State
+// ---------------------------------------------------------------------------
+
+/// Tracks the current hint solution path.
+#[derive(Debug, Clone)]
+pub enum HintState {
+    /// No hint active.
+    Inactive,
+    /// Hint active: `steps` is the full remaining path, `idx` is the current step.
+    Active { steps: Vec<SolverMove>, idx: usize },
+}
+
+impl HintState {
+    pub fn is_active(&self) -> bool {
+        matches!(self, HintState::Active { .. })
+    }
+
+    /// Current step move, if any.
+    pub fn current_move(&self) -> Option<SolverMove> {
+        match self {
+            HintState::Active { steps, idx } => steps.get(*idx).copied(),
+            HintState::Inactive => None,
+        }
+    }
+
+    /// Advance to the next step. Returns `true` if steps are exhausted.
+    pub fn advance(&mut self) -> bool {
+        if let HintState::Active { steps, idx } = self {
+            *idx += 1;
+            if *idx >= steps.len() {
+                *self = HintState::Inactive;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BoardLayout – maps Location → screen Rect for animation / mouse hit-test
 // ---------------------------------------------------------------------------
 
@@ -256,11 +296,13 @@ pub const CARD_PEEK_ROWS: usize = 2;
 /// │    ♦ 4│
 /// ╰───────╯
 /// ```
-fn card_lines(card: Card, selected: bool, spec: CardSpec) -> Vec<Line<'static>> {
+fn card_lines(card: Card, selected: bool, hint: bool, spec: CardSpec) -> Vec<Line<'static>> {
     let inner = spec.inner_w();
 
     let bstyle = if selected {
         Style::default().fg(Color::Blue)
+    } else if hint {
+        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
@@ -337,10 +379,16 @@ fn card_lines(card: Card, selected: bool, spec: CardSpec) -> Vec<Line<'static>> 
 }
 
 /// Top visible rows for every covered tableau card.
-fn card_peek_lines(card: Card, selected: bool, spec: CardSpec) -> Vec<Line<'static>> {
+fn card_peek_lines(card: Card, selected: bool, hint: bool, spec: CardSpec) -> Vec<Line<'static>> {
     let mut lines: Vec<_> = if let Card::Dragon(suit) = card {
         let inner = spec.inner_w();
-        let border = Style::default().fg(if selected { Color::Blue } else { Color::White });
+        let border = if selected {
+            Style::default().fg(Color::Blue)
+        } else if hint {
+            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
         let cstyle = Style::default().fg(suit_color(suit)).add_modifier(Modifier::BOLD);
         let top = Line::from(Span::styled(format!("╭{}╮", "─".repeat(inner)), border));
         let label = format!("D {}", spec.suit_str(suit));
@@ -356,14 +404,18 @@ fn card_peek_lines(card: Card, selected: bool, spec: CardSpec) -> Vec<Line<'stat
         );
         vec![top, row]
     } else {
-        card_lines(card, false, spec)
+        card_lines(card, false, false, spec)
             .into_iter()
             .take(CARD_PEEK_ROWS)
             .collect()
     };
 
-    if selected {
-        let border = Style::default().fg(Color::Blue);
+    if selected || hint {
+        let border = if selected {
+            Style::default().fg(Color::Blue)
+        } else {
+            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+        };
         for line in &mut lines {
             if let Some(first) = line.spans.first_mut() {
                 *first = first.clone().style(border);
@@ -415,7 +467,9 @@ pub struct TuiRenderer {
     header_wins: usize,
     header_seed: u64,
     show_help:   bool,
+    solving:     bool,
     spec:        CardSpec,
+    pub hint:    HintState,
 }
 
 impl TuiRenderer {
@@ -435,7 +489,9 @@ impl TuiRenderer {
             header_wins: 0,
             header_seed: 0,
             show_help: false,
+            solving: false,
             spec,
+            hint: HintState::Inactive,
         })
     }
 
@@ -448,6 +504,33 @@ impl TuiRenderer {
         self.status_log.clear();
     }
 
+    /// Compute src_location for the current hint step (None for Merge — multiple sources).
+    fn hint_locs(&self) -> Option<(Location, Option<Location>)> {
+        match self.hint.current_move()? {
+            SolverMove::ColToCol { src, .. }   => Some((Location::Column(src), None)),
+            SolverMove::ColToFree { src, dst } => Some((Location::Column(src), Some(Location::FreeCell(dst)))),
+            SolverMove::FreeToCol { src, dst } => Some((Location::FreeCell(src), Some(Location::Column(dst)))),
+            SolverMove::ColToFound { src }     => Some((Location::Column(src), None)),
+            SolverMove::FreeToFound { src }    => Some((Location::FreeCell(src), None)),
+            SolverMove::Merge { .. }           => None,  // highlight handled by hint_merge_suit
+        }
+    }
+
+    /// Compute dst_location for arrow drawing.
+    fn hint_dst_loc(&self) -> Option<Location> {
+        match self.hint.current_move()? {
+            SolverMove::ColToCol { dst, .. }       => Some(Location::Column(dst)),
+            SolverMove::ColToFree { dst, .. }      => Some(Location::FreeCell(dst)),
+            SolverMove::FreeToCol { dst, .. }      => Some(Location::Column(dst)),
+            SolverMove::ColToFound { .. }          => {
+                // Point to first foundation slot
+                Some(Location::Foundation(Suit::ALL[0]))
+            }
+            SolverMove::FreeToFound { .. }         => Some(Location::Foundation(Suit::ALL[0])),
+            SolverMove::Merge { suit }             => Some(Location::Foundation(suit)),
+        }
+    }
+
     pub fn draw_board(&mut self, board: &Board) {
         let wins      = self.header_wins;
         let seed      = self.header_seed;
@@ -456,6 +539,25 @@ impl TuiRenderer {
         let show_help = self.show_help;
         let board     = board.clone();
         let spec      = self.spec;
+        let hint_active = self.hint.is_active();
+        let hint_src  = self.hint_locs().map(|(s, _)| s);
+        // Pass the raw move + board so arrow can compute precise source position
+        let hint_mv   = self.hint.current_move();
+        let hint_dst  = self.hint_dst_loc();
+        let board_for_arrow = board.clone();
+        // How many cards are being moved from a column source (for multi-card highlight)
+        let hint_col_depth: Option<(usize, usize)> = match self.hint.current_move() {
+            Some(SolverMove::ColToCol { src, depth_from_top, .. }) => Some((src, depth_from_top + 1)),
+            Some(SolverMove::ColToFree { src, .. })                => Some((src, 1)),
+            Some(SolverMove::ColToFound { src })                   => Some((src, 1)),
+            _                                                      => None,
+        };
+        // For Merge hints: highlight ALL dragon cards of this suit
+        let hint_merge_suit: Option<Suit> = match self.hint.current_move() {
+            Some(SolverMove::Merge { suit }) => Some(suit),
+            _                               => None,
+        };
+        let solving = self.solving;
 
         let mut new_layout = BoardLayout::default();
 
@@ -474,11 +576,17 @@ impl TuiRenderer {
                 .split(area);
 
             render_header_bar(frame, root[0], wins, seed);
-            render_top_row(frame, root[1], &board, &sel, &mut new_layout, spec);
-            render_tableau(frame, root[2], &board, &sel, &mut new_layout, spec);
-            render_statusbar(frame, root[3], &log, &sel);
+            render_top_row(frame, root[1], &board, &sel, hint_src, hint_merge_suit, &mut new_layout, spec);
+            render_tableau(frame, root[2], &board, &sel, hint_src, hint_col_depth, hint_merge_suit, &mut new_layout, spec);
+            render_statusbar(frame, root[3], &log, &sel, hint_active);
 
             if show_help { render_help_overlay(frame, area); }
+            if solving   { render_solving_overlay(frame, area); }
+
+            // Draw hint arrow overlay after board is drawn (layout is now populated)
+            if let (Some(mv), Some(dst_loc)) = (hint_mv, hint_dst) {
+                render_hint_arrow(frame, &new_layout, mv, &board_for_arrow, dst_loc, spec);
+            }
         });
 
         self.layout = new_layout;
@@ -514,6 +622,8 @@ fn render_top_row(
     area: Rect,
     board: &Board,
     sel: &SelectionState,
+    hint_src: Option<Location>,
+    hint_merge_suit: Option<Suit>,
     layout: &mut BoardLayout,
     spec: CardSpec,
 ) {
@@ -539,15 +649,16 @@ fn render_top_row(
     for (i, fc) in board.free_cells.iter().enumerate() {
         let sx = cols[0].x + 1 + i as u16 * (cw + 1);
         let sr = Rect { x: sx, y: area.y, width: cw, height: ch };
-        let is_sel = matches!(sel, SelectionState::FreeCell { idx } if *idx == i);
-
+        let is_sel  = matches!(sel, SelectionState::FreeCell { idx } if *idx == i);
+        let is_hint = hint_src == Some(Location::FreeCell(i))
+            || matches!((hint_merge_suit, fc), (Some(s), FreeCellState::Card(c)) if *c == Card::Dragon(s));
         let lines: Vec<Line> = match fc {
             FreeCellState::Empty => {
                 let key = FC_KEYS[i].to_string();
                 empty_slot(spec, Some(key.as_str()))
             }
             FreeCellState::Card(c) => {
-                card_lines(*c, is_sel, spec)
+                card_lines(*c, is_sel, is_hint, spec)
             }
             FreeCellState::DragonLocked(suit) => {
                 let inner = spec.inner_w();
@@ -591,7 +702,7 @@ fn render_top_row(
     let fx = cols[2].x + 1;
     let fr = Rect { x: fx, y: area.y, width: cw, height: ch };
     let flower_lines: Vec<Line> = if board.flower_placed {
-        card_lines(Card::Flower, false, spec)
+        card_lines(Card::Flower, false, false, spec)
     } else {
         empty_slot(spec, Some(spec.flower_str()))
     };
@@ -606,7 +717,7 @@ fn render_top_row(
         let lines: Vec<Line> = if v == 0 {
             empty_slot(spec, Some(spec.suit_str(suit)))
         } else {
-            card_lines(Card::Numbered(suit, v), false, spec)
+            card_lines(Card::Numbered(suit, v), false, false, spec)
         };
         frame.render_widget(Paragraph::new(lines), sr);
         layout.slots.insert(Location::Foundation(suit), sr);
@@ -632,6 +743,9 @@ fn render_tableau(
     area: Rect,
     board: &Board,
     sel: &SelectionState,
+    hint_src: Option<Location>,
+    hint_col_depth: Option<(usize, usize)>,  // (col_idx, num_cards_being_moved)
+    hint_merge_suit: Option<Suit>,
     layout: &mut BoardLayout,
     spec: CardSpec,
 ) {
@@ -663,6 +777,8 @@ fn render_tableau(
             SelectionState::Column { col, depth } if *col == col_idx => *depth,
             _ => 0,
         };
+        let is_hint_col = hint_src == Some(Location::Column(col_idx));
+        let _is_hint_col = is_hint_col; // kept for possible future use
 
         // Empty column placeholder
         if col.is_empty() {
@@ -685,11 +801,22 @@ fn render_tableau(
             let dist   = n - 1 - ci;   // 0 = top card
             let is_sel = sel_depth > 0 && dist < sel_depth;
 
+            // is_hint: highlight cards that are part of the hinted move
+            // For a column source: all cards from (col_len - depth) upward are highlighted
+            // For a dragon merge: every Dragon card of that suit is highlighted
+            let is_hint_card = if let Some((hcol, hdepth)) = hint_col_depth {
+                hcol == col_idx && dist < hdepth
+            } else if let Some(suit) = hint_merge_suit {
+                card == Card::Dragon(suit)
+            } else {
+                false
+            };
+
             if !is_top {
                 // Render the same top slice a full card would expose under overlap.
                 if y + CARD_PEEK_ROWS as u16 <= bottom {
                     let r = Rect { x: col_x, y, width: cw, height: CARD_PEEK_ROWS as u16 };
-                    frame.render_widget(Paragraph::new(card_peek_lines(card, is_sel, spec)), r);
+                    frame.render_widget(Paragraph::new(card_peek_lines(card, is_sel, is_hint_card, spec)), r);
                 }
                 y += CARD_PEEK_ROWS as u16;
             } else {
@@ -697,7 +824,7 @@ fn render_tableau(
                 if y + ch <= bottom {
                     let r = Rect { x: col_x, y, width: cw, height: ch };
                     frame.render_widget(
-                        Paragraph::new(card_lines(card, is_sel, spec)),
+                        Paragraph::new(card_lines(card, is_sel, is_hint_card, spec)),
                         r,
                     );
                 }
@@ -711,11 +838,197 @@ fn render_tableau(
     }
 }
 
+/// Draw an L-shaped hint arrow from the source card's rendered position to the destination slot.
+///
+/// Source point: center of the topmost moved card (bottom-most in the stack = first card grabbed),
+/// computed from tile geometry rather than column-slot rect.
+/// Destination point: center of the destination slot rect.
+fn render_hint_arrow(
+    frame: &mut Frame,
+    layout: &BoardLayout,
+    mv: SolverMove,
+    board: &Board,
+    dst_loc: Location,
+    spec: CardSpec,
+) {
+    let arrow_style = Style::default()
+        .fg(Color::LightYellow)
+        .add_modifier(Modifier::BOLD);
+
+    // ── Compute source point ────────────────────────────────────────────────
+    // For column sources: start from the center of the first card being moved
+    // (i.e. the card furthest down in the stack away from the top).
+    let src_point: Option<(u16, u16)> = match mv {
+        // Column source with potentially multiple cards
+        SolverMove::ColToCol { src, depth_from_top, .. } => {
+            let col_len = board.columns[src].len();
+            if let Some(col_rect) = layout.slots.get(&Location::Column(src)) {
+                let first_moved_idx = col_len.saturating_sub(depth_from_top + 1);
+                let card_y  = col_rect.y + first_moved_idx as u16 * CARD_PEEK_ROWS as u16;
+                let card_cx = col_rect.x + spec.card_w() / 2;
+                // Top card renders as full height; non-top cards render as peek
+                let card_cy = if depth_from_top == 0 {
+                    card_y + spec.card_h() / 2       // full card center
+                } else {
+                    card_y + CARD_PEEK_ROWS as u16 / 2  // peek center
+                };
+                Some((card_cx, card_cy))
+            } else { None }
+        }
+        // Column source, single top card
+        SolverMove::ColToFree { src, .. } | SolverMove::ColToFound { src } => {
+            let col_len = board.columns[src].len();
+            if let Some(col_rect) = layout.slots.get(&Location::Column(src)) {
+                let top_y   = col_rect.y + col_len.saturating_sub(1) as u16 * CARD_PEEK_ROWS as u16;
+                let card_cx = col_rect.x + spec.card_w() / 2;
+                Some((card_cx, top_y + spec.card_h() / 2))  // full card center
+            } else { None }
+        }
+        SolverMove::FreeToCol { src, .. } | SolverMove::FreeToFound { src } => {
+            layout.slots.get(&Location::FreeCell(src))
+                .map(|r| (r.x + r.width / 2, r.y + r.height / 2))
+        }
+        SolverMove::Merge { .. } => None,
+    };
+
+    // ── Compute destination point ────────────────────────────────────────────
+    // For column destinations: tip = top of where the moved card(s) will appear,
+    // i.e. col_rect.y + current_col_len × CARD_PEEK_ROWS (the next peek slot).
+    let dst_point: Option<(u16, u16)> = match mv {
+        // Column destination: center of the current top card (the one being stacked on)
+        SolverMove::ColToCol { dst, .. } | SolverMove::FreeToCol { dst, .. } => {
+            let col_len = board.columns[dst].len();
+            layout.slots.get(&Location::Column(dst)).map(|r| {
+                let center_y = if col_len == 0 {
+                    r.y + spec.card_h() / 2  // empty slot: center of placeholder
+                } else {
+                    r.y + (col_len - 1) as u16 * CARD_PEEK_ROWS as u16 + spec.card_h() / 2
+                };
+                (r.x + spec.card_w() / 2, center_y)
+            })
+        }
+        SolverMove::ColToFree { dst, .. } => {
+            layout.slots.get(&Location::FreeCell(dst))
+                .map(|r| (r.x + r.width / 2, r.y + r.height / 2))
+        }
+        _ => {
+            // Foundation / Merge: use slot center
+            layout.slots.get(&dst_loc)
+                .map(|r| (r.x + r.width / 2, r.y + r.height / 2))
+        }
+    };
+
+    let (Some((src_cx, src_cy)), Some((dst_cx, dst_cy))) = (src_point, dst_point) else {
+        return;
+    };
+
+    if src_cx == dst_cx && src_cy == dst_cy { return; }
+
+    // Both source and destination anchored at horizontal center; dst y = landing top.
+
+    if src_cy == dst_cy {
+        // Pure horizontal arrow
+        let going_right = src_cx < dst_cx;
+        let (body_l, body_r) = if going_right {
+            (src_cx + 1, dst_cx.saturating_sub(1))
+        } else {
+            (dst_cx + 1, src_cx.saturating_sub(1))
+        };
+        for x in body_l..=body_r {
+            frame.render_widget(
+                Paragraph::new("─").style(arrow_style),
+                Rect { x, y: src_cy, width: 1, height: 1 },
+            );
+        }
+        let tip = if going_right { "▶" } else { "◀" };
+        frame.render_widget(
+            Paragraph::new(tip).style(arrow_style),
+            Rect { x: dst_cx, y: dst_cy, width: 1, height: 1 },
+        );
+    } else if src_cx == dst_cx {
+        // Pure vertical arrow (same column)
+        let going_down = src_cy < dst_cy;
+        let (body_t, body_b) = if going_down {
+            (src_cy + 1, dst_cy.saturating_sub(1))
+        } else {
+            (dst_cy + 1, src_cy.saturating_sub(1))
+        };
+        for y in body_t..=body_b {
+            frame.render_widget(
+                Paragraph::new("│").style(arrow_style),
+                Rect { x: src_cx, y, width: 1, height: 1 },
+            );
+        }
+        let tip = if going_down { "▼" } else { "▲" };
+        frame.render_widget(
+            Paragraph::new(tip).style(arrow_style),
+            Rect { x: dst_cx, y: dst_cy, width: 1, height: 1 },
+        );
+    } else {
+        // L-shaped: horizontal at src row, then vertical to dst row
+        // The turn column is dst_cx.
+        let going_right = src_cx <= dst_cx;
+        let going_down  = src_cy < dst_cy;
+
+        // Horizontal segment (from src_cx toward dst_cx, stopping before corner)
+        if src_cx != dst_cx {
+            let (lx, rx) = if going_right {
+                (src_cx, dst_cx.saturating_sub(1))
+            } else {
+                (dst_cx + 1, src_cx)
+            };
+            for x in lx..=rx {
+                frame.render_widget(
+                    Paragraph::new("─").style(arrow_style),
+                    Rect { x, y: src_cy, width: 1, height: 1 },
+                );
+            }
+        }
+
+        // Corner at (dst_cx, src_cy)
+        // incoming horizontal from left + outgoing down   => ╮
+        // incoming horizontal from left + outgoing up     => ╯
+        // incoming horizontal from right + outgoing down  => ╭
+        // incoming horizontal from right + outgoing up    => ╰
+        let corner = match (going_right, going_down) {
+            (true,  true)  => "╮",
+            (true,  false) => "╯",
+            (false, true)  => "╭",
+            (false, false) => "╰",
+        };
+        frame.render_widget(
+            Paragraph::new(corner).style(arrow_style),
+            Rect { x: dst_cx, y: src_cy, width: 1, height: 1 },
+        );
+
+        // Vertical segment between corner and tip (exclusive)
+        let (vy_start, vy_end) = if going_down {
+            (src_cy + 1, dst_cy)
+        } else {
+            (dst_cy + 1, src_cy)
+        };
+        for y in vy_start..vy_end {
+            frame.render_widget(
+                Paragraph::new("│").style(arrow_style),
+                Rect { x: dst_cx, y, width: 1, height: 1 },
+            );
+        }
+
+        // Tip
+        let tip = if going_down { "▼" } else { "▲" };
+        frame.render_widget(
+            Paragraph::new(tip).style(arrow_style),
+            Rect { x: dst_cx, y: dst_cy, width: 1, height: 1 },
+        );
+    }
+}
+
 fn render_statusbar(
     frame: &mut Frame,
     area: Rect,
     log: &[(LogLevel, String)],
     sel: &SelectionState,
+    hint_active: bool,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -723,9 +1036,13 @@ fn render_statusbar(
         .split(area);
 
     let hint = match sel {
+        SelectionState::Idle if hint_active =>
+            Span::styled(
+                " HINT  |  Green = next card to move  |  H = exit  |  wrong move auto-exits",
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
         SelectionState::Idle =>
             Span::styled(
-                " cols: q w e r t y u i  |  free cells: 1 2 3  |  D=dragon  Z=undo  N=new  ?=help  Ctrl-C=quit",
+                " cols: q w e r t y u i  |  free cells: 1 2 3  |  D=dragon  H=hint  Z=undo  N=new  ?=help  Ctrl-C=quit",
                 Style::default().fg(Color::DarkGray)),
         SelectionState::Column { col, depth } =>
             Span::styled(
@@ -763,6 +1080,31 @@ fn render_statusbar(
     );
 }
 
+fn render_solving_overlay(frame: &mut Frame, area: Rect) {
+    let w = 28u16.min(area.width);
+    let h = 5u16.min(area.height);
+    let popup = Rect {
+        x: area.width.saturating_sub(w) / 2,
+        y: area.height.saturating_sub(h) / 2,
+        width: w, height: h,
+    };
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD))
+        .title(Span::styled(" Solver ", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ⧖ Solving… please wait  ",
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let w = 68u16.min(area.width);
     let h = 22u16.min(area.height);
@@ -786,6 +1128,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  D then r / g / b  merge dragons by suit"),
         Line::from("  Z                 undo"),
         Line::from("  N                 new game"),
+        Line::from("  H                 run solver hint / exit hint mode"),
         Line::from("  ?                 toggle this help"),
         Line::from(""),
         Line::from("  Mouse"),
@@ -836,6 +1179,16 @@ pub trait TuiRendererExt {
     fn hit_test(&self, x: u16, y: u16) -> Option<Location>;
     fn slot_rect(&self, loc: Location) -> Option<Rect>;
     fn clear_status_log(&mut self);
+
+    // Hint management
+    fn set_hint_steps(&mut self, steps: Vec<SolverMove>);
+    fn clear_hint(&mut self);
+    fn advance_hint(&mut self) -> bool;   // true = hint exhausted
+    fn hint_next_move(&self) -> Option<SolverMove>;
+    fn is_hint_active(&self) -> bool;
+    // Solving overlay
+    fn show_solving(&mut self);
+    fn hide_solving(&mut self);
 }
 
 impl TuiRendererExt for TuiRenderer {
@@ -845,6 +1198,24 @@ impl TuiRendererExt for TuiRenderer {
     fn hit_test(&self, x: u16, y: u16) -> Option<Location> { self.layout.hit_test(x, y) }
     fn slot_rect(&self, loc: Location) -> Option<Rect> { self.layout.slots.get(&loc).copied() }
     fn clear_status_log(&mut self) { self.clear_log(); }
+
+    fn set_hint_steps(&mut self, steps: Vec<SolverMove>) {
+        self.hint = HintState::Active { steps, idx: 0 };
+    }
+    fn clear_hint(&mut self) {
+        self.hint = HintState::Inactive;
+    }
+    fn advance_hint(&mut self) -> bool {
+        self.hint.advance()
+    }
+    fn hint_next_move(&self) -> Option<SolverMove> {
+        self.hint.current_move()
+    }
+    fn is_hint_active(&self) -> bool {
+        self.hint.is_active()
+    }
+    fn show_solving(&mut self) { self.solving = true; }
+    fn hide_solving(&mut self) { self.solving = false; }
 }
 
 // ---------------------------------------------------------------------------

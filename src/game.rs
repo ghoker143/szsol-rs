@@ -273,6 +273,29 @@ impl<R: Renderer> Game<R> {
                     self.tui_new_game();
                 } else if c == '?' {
                     self.renderer.toggle_help();
+                } else if c == 'h' || c == 'H' {
+                    // Hint: run solver or toggle hint off
+                    if self.renderer.is_hint_active() {
+                        self.renderer.clear_hint();
+                        self.renderer.info("Hint mode deactivated.");
+                    } else {
+                        // Show overlay, redraw, block on solve, hide overlay
+                        self.renderer.show_solving();
+                        self.renderer.render_header(self.save_data.total_wins(), self.board.seed);
+                        self.renderer.render(&self.board);
+                        let result = crate::solver::solve(&self.board, |_| {});
+                        self.renderer.hide_solving();
+                        match result {
+                            None => {
+                                self.renderer.error("No solution found for current board.");
+                            }
+                            Some(path) => {
+                                let n = path.len();
+                                self.renderer.set_hint_steps(path);
+                                self.renderer.info(&format!("Hint active: {} step(s). Green = next card. H to exit.", n));
+                            }
+                        }
+                    }
                 } else if let Some(col) = COL_KEYS.iter().position(|&k| k == c) {
                     if !self.board.columns[col].is_empty() {
                         self.renderer.set_selection(SelectionState::Column { col, depth: 1 });
@@ -361,7 +384,7 @@ impl<R: Renderer> Game<R> {
                             }
                         }
                     } else {
-                        self.renderer.error("只能移动单张牌到空格。");
+                        self.renderer.error("Only single cards can be moved to a free cell.");
                     }
                     self.renderer.set_selection(SelectionState::Idle);
                     return;
@@ -373,6 +396,11 @@ impl<R: Renderer> Game<R> {
                         self.board = prev;
                         self.renderer.clear_status_log();
                         self.renderer.info("Undo.");
+                        // Deviation from hint on undo
+                        if self.renderer.is_hint_active() {
+                            self.renderer.clear_hint();
+                            self.renderer.info("Hint mode exited after undo.");
+                        }
                     }
                     self.renderer.set_selection(SelectionState::Idle);
                 }
@@ -413,6 +441,11 @@ impl<R: Renderer> Game<R> {
                         self.board = prev;
                         self.renderer.clear_status_log();
                         self.renderer.info("Undo.");
+                        // Deviation from hint on undo
+                        if self.renderer.is_hint_active() {
+                            self.renderer.clear_hint();
+                            self.renderer.info("Hint mode exited after undo.");
+                        }
                     }
                     self.renderer.set_selection(SelectionState::Idle);
                 }
@@ -588,12 +621,21 @@ impl<R: Renderer> Game<R> {
         requested.min(valid_len).max(1)
     }
 
-    /// Common post-move logic in TUI: auto-move, save, win-check.
+    /// Common post-move logic in TUI: auto-move, save, win-check, hint deviation.
     fn tui_post_move(&mut self)
     where
         R: crate::tui_renderer::TuiRendererExt,
     {
         self.renderer.clear_status_log();
+
+        // Read hint move BEFORE auto_move so we can compare expected vs actual.
+        let hint_mv = self.renderer.hint_next_move();
+
+        // PRE-MOVE board for deviation simulation is self.history.last():
+        // save_history() is always called before any move is applied, so the top
+        // of history is the board state the solver's hint move was designed for.
+        let pre_move_board = self.history.last().cloned();
+
         let (n, events) = self.board.auto_move();
         self.renderer.push_events(events);
         if n > 0 {
@@ -604,6 +646,30 @@ impl<R: Renderer> Game<R> {
             last.undo_history = self.history.clone();
         }
         self.save_data.save();
+
+        // Check hint deviation: simulate expected result and compare with actual board.
+        if let (Some(mv), Some(pre)) = (hint_mv, pre_move_board) {
+            // Only simulate if the move is still valid on the pre-move board.
+            // This guards against stale hints and prevents apply_move panics.
+            let still_valid = pre.valid_moves().contains(&mv);
+            if still_valid {
+                let mut expected = pre;
+                expected.apply_move(mv); // includes internal auto_move
+                if expected == self.board {
+                    let done = self.renderer.advance_hint();
+                    if done {
+                        self.renderer.info("Hint path complete.");
+                    }
+                } else {
+                    self.renderer.clear_hint();
+                    self.renderer.info("Deviated from hint. Hint mode exited.");
+                }
+            } else {
+                // Hint is stale (board drifted from expected); clear silently.
+                self.renderer.clear_hint();
+            }
+        }
+
         if self.board.is_won() {
             self.record_win();
             self.renderer.win();
@@ -646,6 +712,7 @@ impl<R: Renderer> Game<R> {
         self.record_abandon();
         self.board = Board::deal_random();
         self.history.clear();
+        self.renderer.clear_hint();
 
         let initial_board = self.board.clone();
         let (n, events) = self.board.auto_move();
@@ -746,7 +813,7 @@ impl<R: Renderer> Game<R> {
             Command::Solve => {
                 self.renderer.info("Running A* solver... (may take a moment)");
                 
-                if let Some(path) = crate::solver::solve(&self.board) {
+                if let Some(path) = crate::solver::solve(&self.board, |s| println!("{}", s)) {
                     self.renderer.info(&format!("Found a solution in {} steps!", path.len()));
                     for (i, m) in path.iter().enumerate() {
                         self.renderer.info(&format!("{:4}. {}", i + 1, m.to_command_str()));

@@ -1,5 +1,7 @@
 # 🀄 SZSOL-RS
 
+[![AUR version](https://img.shields.io/aur/version/szsol-rs)](https://aur.archlinux.org/packages/szsol-rs/)
+
 A **SHENZHEN I/O Solitaire** clone written in Rust.
 
 Inspired by [usrshare/szsol](https://github.com/usrshare/szsol).
@@ -13,6 +15,8 @@ Inspired by [usrshare/szsol](https://github.com/usrshare/szsol).
 - 🧠 **Built-in A\* Solver** — finds a winning line, or confirms a stuck board
 - 💾 Auto-save & resume — picks up right where you left off
 - 🏆 Persistent win counter with escalating job titles
+
+[![asciicast](https://asciinema.org/a/LuC3KwworFvC2nm4.svg)](https://asciinema.org/a/LuC3KwworFvC2nm4)
 
 ## 🚀 Getting Started
 

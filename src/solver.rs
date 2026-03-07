@@ -285,16 +285,14 @@ impl Ord for SearchNode {
 
 /// A* pathfinding solver.
 ///
-/// Uses `heuristic()` to guide the search toward promising states first.
-/// The `visited` HashSet prevents re-exploring the same board position.
-/// Gives up after `NODE_LIMIT` nodes to keep the game responsive.
-pub fn solve(initial_board: &Board) -> Option<Vec<SolverMove>> {
+/// A* pathfinding solver. `log` receives progress messages — pass `|s| println!("{}", s)`
+/// for CLI output or `|_| {}` to suppress output (TUI mode).
+pub fn solve<F: FnMut(&str)>(initial_board: &Board, mut log: F) -> Option<Vec<SolverMove>> {
     let mut heap: BinaryHeap<SearchNode> = BinaryHeap::new();
     let mut visited: HashSet<Board> = HashSet::new();
 
     let mut start = initial_board.clone();
     let _ = start.auto_move();
-
 
     let h0 = heuristic(&start);
     heap.push(SearchNode { neg_f: h0, g: 0, board: start.clone(), path: Vec::new() });
@@ -305,18 +303,18 @@ pub fn solve(initial_board: &Board) -> Option<Vec<SolverMove>> {
 
     while let Some(SearchNode { board: state, path, g, .. }) = heap.pop() {
         if state.is_won() {
-            println!("\nSolver: Found solution in {} moves! Explored {} nodes.", path.len(), nodes_explored);
+            log(&format!("\nSolver: Found solution in {} moves! Explored {} nodes.", path.len(), nodes_explored));
             return Some(path);
         }
 
         nodes_explored += 1;
         if nodes_explored > NODE_LIMIT {
-            println!("\nSolver: Node limit ({}) reached. No solution found.", NODE_LIMIT);
+            log(&format!("\nSolver: Node limit ({}) reached. No solution found.", NODE_LIMIT));
             return None;
         }
 
         if nodes_explored % 10_000 == 0 {
-            println!("  ... {} nodes explored so far", nodes_explored);
+            log(&format!("  ... {} nodes explored so far", nodes_explored));
         }
 
         for m in state.valid_moves() {
@@ -326,9 +324,6 @@ pub fn solve(initial_board: &Board) -> Option<Vec<SolverMove>> {
             if visited.insert(next.clone()) {
                 let g_next = g + 1;
                 let h = heuristic(&next);
-                // We want to MAXIMISE the score towards the goal.
-                // Priority = h (board quality) - g_next (cost so far).
-                // Stored as neg_f in the max-heap so best states are popped first.
                 let neg_f = h - g_next as i32;
 
                 let mut next_path = path.clone();
@@ -338,6 +333,6 @@ pub fn solve(initial_board: &Board) -> Option<Vec<SolverMove>> {
         }
     }
 
-    println!("\nSolver: Search exhausted ({} nodes), no solution found.", nodes_explored);
+    log(&format!("\nSolver: Search exhausted ({} nodes), no solution found.", nodes_explored));
     None
 }
