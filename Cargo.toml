@@ -1,6 +1,6 @@
 [package]
 name = "szsol-rs"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "SHENZHEN I/O Solitaire – CLI clone in Rust"
 repository = "https://github.com/ghoker143/szsol-rs"

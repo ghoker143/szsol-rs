@@ -204,7 +204,12 @@ impl<R: Renderer> Game<R> {
             if ct_event::poll(Duration::from_millis(16)).unwrap_or(false) {
                 match ct_event::read() {
                     Ok(Event::Key(key)) => {
-                        self.handle_tui_key(key);
+                        // Windows sends both Press and Release per keystroke;
+                        // only handle Press (and Repeat for held keys).
+                        use crossterm::event::KeyEventKind;
+                        if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                            self.handle_tui_key(key);
+                        }
                     }
                     Ok(Event::Mouse(me)) => {
                         self.handle_tui_mouse(me);

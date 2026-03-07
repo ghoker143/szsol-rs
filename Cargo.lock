@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "szsol-rs"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bincode",
  "crossterm",
