@@ -22,6 +22,7 @@
  */
 use std::collections::{HashMap, VecDeque};
 use std::io::Stdout;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -459,6 +460,68 @@ fn empty_slot(spec: CardSpec, label: Option<&str>) -> Vec<Line<'static>> {
 #[derive(Debug, Clone, Copy)]
 enum LogLevel { Info, Error }
 
+#[derive(Debug, Clone)]
+pub struct ActiveAnimation {
+    pub event: GameEvent,
+    pub start_time: Instant,
+    pub duration: Duration,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimStyle {
+    Linear,
+    EaseOutQuad,
+    EaseOutCubic,
+    EaseInOutQuad,
+}
+
+impl AnimStyle {
+    pub fn interpolate(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            AnimStyle::Linear => t,
+            AnimStyle::EaseOutQuad => 1.0 - (1.0 - t) * (1.0 - t),
+            AnimStyle::EaseOutCubic => 1.0 - (1.0 - t).powi(3),
+            AnimStyle::EaseInOutQuad => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimSpeed {
+    Off,
+    Fast,
+    Normal,
+    Slow,
+}
+
+impl AnimSpeed {
+    pub fn next(self) -> Self {
+        match self {
+            AnimSpeed::Off => AnimSpeed::Fast,
+            AnimSpeed::Fast => AnimSpeed::Normal,
+            AnimSpeed::Normal => AnimSpeed::Slow,
+            AnimSpeed::Slow => AnimSpeed::Off,
+        }
+    }
+
+    pub fn scale(self) -> f32 {
+        match self {
+            AnimSpeed::Off => 0.0,
+            AnimSpeed::Fast => 0.5,
+            AnimSpeed::Normal => 1.0,
+            AnimSpeed::Slow => 2.0,
+        }
+    }
+}
+
 pub struct TuiRenderer {
     terminal:    Terminal<CrosstermBackend<Stdout>>,
     pub selection: SelectionState,
@@ -470,6 +533,12 @@ pub struct TuiRenderer {
     solving:     bool,
     spec:        CardSpec,
     pub hint:    HintState,
+    // Animation state
+    anim_queue:  VecDeque<GameEvent>,
+    current_anim: Option<ActiveAnimation>,
+    anim_board:  Option<Board>,
+    pub anim_speed: AnimSpeed,
+    pub anim_style: AnimStyle,
 }
 
 impl TuiRenderer {
@@ -492,6 +561,11 @@ impl TuiRenderer {
             solving: false,
             spec,
             hint: HintState::Inactive,
+            anim_queue: VecDeque::new(),
+            current_anim: None,
+            anim_board: None,
+            anim_speed: AnimSpeed::Normal,
+            anim_style: AnimStyle::EaseOutQuad,
         })
     }
 
@@ -531,35 +605,90 @@ impl TuiRenderer {
         }
     }
 
-    pub fn draw_board(&mut self, board: &Board) {
+    pub fn draw_board(&mut self, real_board: &Board) {
+        let is_animating = self.current_anim.is_some() || !self.anim_queue.is_empty();
+        
+        let board_to_draw = if is_animating {
+            // Keep the cached anim_board (or fallback to real_board if missing)
+            self.anim_board.as_ref().unwrap_or(real_board)
+        } else {
+            // Not animating: seamlessly update our cached visual board to the real one
+            self.anim_board = Some(real_board.clone());
+            real_board
+        };
+
+        let mut board = board_to_draw.clone();
+
+        let (hide_src, hide_dragon, hide_stack, hide_all) = match &self.current_anim {
+            Some(anim) => match &anim.event {
+                GameEvent::CardMoved { src, .. } => (Some(*src), None, None, false),
+                GameEvent::DragonsMerged { suit, .. } => (None, Some(*suit), None, false),
+                GameEvent::StackMoved { stack, src_col, .. } => (None, None, Some((*src_col, stack.len())), false),
+                GameEvent::Dealt { .. } => (None, None, None, true),
+                _ => (None, None, None, false),
+            },
+            None => (None, None, None, false),
+        };
+
+        if hide_all {
+            board.columns.iter_mut().for_each(|c| c.clear());
+            board.free_cells.iter_mut().for_each(|f| *f = FreeCellState::Empty);
+            board.foundations = [0; 3];
+            board.flower_placed = false;
+        }
+
+        // Pre-modify the local `board` copy so the renderer naturally skips the
+        // source cards (they will be drawn as flying overlays instead).
+        if let Some(src) = hide_src {
+            match src {
+                Location::Column(c) => { board.columns[c].pop(); }
+                Location::FreeCell(f) => { board.free_cells[f] = FreeCellState::Empty; }
+                _ => {}
+            }
+        }
+        if let Some(suit) = hide_dragon {
+            let dragon = Card::Dragon(suit);
+            for col in board.columns.iter_mut() {
+                if col.last() == Some(&dragon) { col.pop(); }
+            }
+            for fc in board.free_cells.iter_mut() {
+                if *fc == FreeCellState::Card(dragon) { *fc = FreeCellState::Empty; }
+            }
+        }
+        if let Some((c, count)) = hide_stack {
+            let len = board.columns[c].len();
+            board.columns[c].truncate(len.saturating_sub(count));
+        }
+
         let wins      = self.header_wins;
         let seed      = self.header_seed;
         let log: Vec<_> = self.status_log.iter().cloned().collect();
         let sel       = self.selection.clone();
         let show_help = self.show_help;
-        let board     = board.clone();
         let spec      = self.spec;
         let hint_active = self.hint.is_active();
         let hint_src  = self.hint_locs().map(|(s, _)| s);
-        // Pass the raw move + board so arrow can compute precise source position
         let hint_mv   = self.hint.current_move();
         let hint_dst  = self.hint_dst_loc();
-        let board_for_arrow = board.clone();
-        // How many cards are being moved from a column source (for multi-card highlight)
+        let board_for_arrow = board_to_draw.clone();
         let hint_col_depth: Option<(usize, usize)> = match self.hint.current_move() {
             Some(SolverMove::ColToCol { src, depth_from_top, .. }) => Some((src, depth_from_top + 1)),
             Some(SolverMove::ColToFree { src, .. })                => Some((src, 1)),
             Some(SolverMove::ColToFound { src })                   => Some((src, 1)),
             _                                                      => None,
         };
-        // For Merge hints: highlight ALL dragon cards of this suit
         let hint_merge_suit: Option<Suit> = match self.hint.current_move() {
             Some(SolverMove::Merge { suit }) => Some(suit),
             _                               => None,
         };
         let solving = self.solving;
+        let speed = self.anim_speed;
 
         let mut new_layout = BoardLayout::default();
+
+        // Check if we have an active animation to overlay
+        let current_anim_clone = self.current_anim.clone();
+        let anim_style_clone = self.anim_style;
 
         let _ = self.terminal.draw(|frame| {
             let area = frame.area();
@@ -578,14 +707,18 @@ impl TuiRenderer {
             render_header_bar(frame, root[0], wins, seed);
             render_top_row(frame, root[1], &board, &sel, hint_src, hint_merge_suit, &mut new_layout, spec);
             render_tableau(frame, root[2], &board, &sel, hint_src, hint_col_depth, hint_merge_suit, &mut new_layout, spec);
-            render_statusbar(frame, root[3], &log, &sel, hint_active);
+            render_statusbar(frame, root[3], &log, &sel, hint_active, speed);
 
             if show_help { render_help_overlay(frame, area); }
             if solving   { render_solving_overlay(frame, area); }
 
-            // Draw hint arrow overlay after board is drawn (layout is now populated)
             if let (Some(mv), Some(dst_loc)) = (hint_mv, hint_dst) {
                 render_hint_arrow(frame, &new_layout, mv, &board_for_arrow, dst_loc, spec);
+            }
+
+            // Draw Animation Overlay Custom
+            if let Some(anim) = &current_anim_clone {
+                render_animation_overlay(frame, root[1], root[2], anim, &board_to_draw, spec, anim_style_clone);
             }
         });
 
@@ -1029,7 +1162,14 @@ fn render_statusbar(
     log: &[(LogLevel, String)],
     sel: &SelectionState,
     hint_active: bool,
+    anim_speed: AnimSpeed,
 ) {
+    let speed_label = match anim_speed {
+        AnimSpeed::Off => "Off",
+        AnimSpeed::Fast => "Fast",
+        AnimSpeed::Normal => "Norm",
+        AnimSpeed::Slow => "Slow",
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -1042,7 +1182,7 @@ fn render_statusbar(
                 Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
         SelectionState::Idle =>
             Span::styled(
-                " cols: q w e r t y u i  |  free cells: 1 2 3  |  D=dragon  H=hint  Z=undo  N=new  ?=help  Ctrl-C=quit",
+                format!(" cols: q w e r t y u i  |  cells: 1 2 3  |  D=drgn H=hint S=spd({}) Z=undo N=new Ctrl-C=exit", speed_label),
                 Style::default().fg(Color::DarkGray)),
         SelectionState::Column { col, depth } =>
             Span::styled(
@@ -1127,6 +1267,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  Esc               cancel selection"),
         Line::from("  D then r / g / b  merge dragons by suit"),
         Line::from("  Z                 undo"),
+        Line::from("  S                 toggle animation speed"),
         Line::from("  N                 new game"),
         Line::from("  H                 run solver hint / exit hint mode"),
         Line::from("  ?                 toggle this help"),
@@ -1150,6 +1291,194 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ),
         popup,
     );
+}
+
+fn get_slot_pos(loc: &Location, board: &Board, spec: CardSpec, top_area: Rect, tab_area: Rect, is_src: bool) -> (u16, u16) {
+    let cw = spec.card_w();
+    let col_step = cw + 2;
+    match loc {
+        Location::Column(c) => {
+            let x = tab_area.x + *c as u16 * col_step;
+            let mut cards_in_col = board.columns[*c].len() as u16;
+            if is_src && cards_in_col > 0 {
+                cards_in_col -= 1;
+            }
+            let y = tab_area.y + 1 + cards_in_col * CARD_PEEK_ROWS as u16;
+            (x, y)
+        }
+        Location::FreeCell(fc) => {
+            (top_area.x + 1 + *fc as u16 * (cw + 1), top_area.y)
+        }
+        Location::Flower => {
+            let fc_block_w = NUM_FREE_CELLS as u16 * (cw + 1) + 1;
+            (top_area.x + fc_block_w + 3, top_area.y)
+        }
+        Location::Foundation(suit) => {
+            let idx = match suit { Suit::Red => 0, Suit::Green => 1, Suit::Black => 2 };
+            let fc_block_w = NUM_FREE_CELLS as u16 * (cw + 1) + 1;
+            let start = top_area.x + fc_block_w + cw + 6;
+            (start + 1 + idx as u16 * (cw + 1), top_area.y)
+        }
+    }
+}
+
+fn render_animation_overlay(
+    frame: &mut Frame,
+    top_row_rect: Rect,
+    tab_rect: Rect,
+    anim: &ActiveAnimation,
+    board: &Board,
+    spec: CardSpec,
+    style: AnimStyle,
+) {
+    let p = anim.start_time.elapsed().as_secs_f32() / anim.duration.as_secs_f32();
+    let p = style.interpolate(p);
+
+    let area_max_x = frame.area().width;
+    let area_max_y = frame.area().height;
+
+    match &anim.event {
+        GameEvent::CardMoved { card, src, dst } => {
+            let (sx, sy) = get_slot_pos(src, board, spec, top_row_rect, tab_rect, true);
+            let (dx, dy) = get_slot_pos(dst, board, spec, top_row_rect, tab_rect, false);
+
+            let cx = sx as f32 + (dx as f32 - sx as f32) * p;
+            let cy = sy as f32 + (dy as f32 - sy as f32) * p;
+            
+            let x = cx.round() as u16;
+            let y = cy.round() as u16;
+            
+            if x + spec.card_w() <= area_max_x && y + spec.card_h() <= area_max_y {
+                let cr = Rect { x, y, width: spec.card_w(), height: spec.card_h() };
+                frame.render_widget(Clear, cr);
+                frame.render_widget(
+                    Paragraph::new(card_lines(*card, false, false, spec))
+                        .style(Style::default().bg(Color::Reset)),
+                    cr
+                );
+            }
+        }
+        GameEvent::DragonsMerged { suit, locked_cell } => {
+            let dest_loc = Location::FreeCell(*locked_cell);
+            let (dx, dy) = get_slot_pos(&dest_loc, board, spec, top_row_rect, tab_rect, false);
+            let dragon_card = Card::Dragon(*suit);
+
+            let mut sources = Vec::new();
+            for (i, fc) in board.free_cells.iter().enumerate() {
+                if *fc == FreeCellState::Card(dragon_card) {
+                    sources.push(Location::FreeCell(i));
+                }
+            }
+            for (i, col) in board.columns.iter().enumerate() {
+                if col.last() == Some(&dragon_card) {
+                    sources.push(Location::Column(i));
+                }
+            }
+
+            for src in sources {
+                let (sx, sy) = get_slot_pos(&src, board, spec, top_row_rect, tab_rect, true);
+                let cx = sx as f32 + (dx as f32 - sx as f32) * p;
+                let cy = sy as f32 + (dy as f32 - sy as f32) * p;
+                let x = cx.round() as u16;
+                let y = cy.round() as u16;
+                
+                if x + spec.card_w() <= area_max_x && y + spec.card_h() <= area_max_y {
+                    let cr = Rect { x, y, width: spec.card_w(), height: spec.card_h() };
+                    frame.render_widget(Clear, cr);
+                    frame.render_widget(
+                        Paragraph::new(card_lines(dragon_card, false, false, spec))
+                            .style(Style::default().bg(Color::Reset)),
+                        cr
+                    );
+                }
+            }
+        }
+        GameEvent::StackMoved { stack, src_col, dst_col } => {
+            let cw = spec.card_w();
+            let col_step = cw + 2;
+            let cx_src = tab_rect.x + *src_col as u16 * col_step;
+            let cx_dst = tab_rect.x + *dst_col as u16 * col_step;
+            
+            let full_src_len = board.columns[*src_col].len();
+            let stack_base_idx = full_src_len.saturating_sub(stack.len());
+            let src_y_base = tab_rect.y + 1 + stack_base_idx as u16 * CARD_PEEK_ROWS as u16;
+            
+            let dst_len = board.columns[*dst_col].len();
+            let dst_y_base = tab_rect.y + 1 + dst_len as u16 * CARD_PEEK_ROWS as u16;
+            
+            let raw_t = anim.start_time.elapsed().as_secs_f32() / anim.duration.as_secs_f32();
+
+            for (i, &card) in stack.iter().enumerate() {
+                // Slinky trail effect: subordinate cards lag behind the top card initially
+                // and snap into place at the end.
+                let lag = 0.15 * i as f32;
+                let local_t = (raw_t * (1.0 + lag) - lag).clamp(0.0, 1.0);
+                let p_i = style.interpolate(local_t);
+
+                let trail_x = cx_src as f32 + (cx_dst as f32 - cx_src as f32) * p_i;
+                let trail_y = src_y_base as f32 + (dst_y_base as f32 - src_y_base as f32) * p_i;
+
+                let x = trail_x.round() as u16;
+                let y = (trail_y + i as f32 * CARD_PEEK_ROWS as f32).round() as u16;
+                
+                if x + spec.card_w() <= area_max_x && y + spec.card_h() <= area_max_y {
+                    let cr = Rect { x, y, width: spec.card_w(), height: spec.card_h() };
+                    frame.render_widget(Clear, cr);
+                    frame.render_widget(
+                        Paragraph::new(card_lines(card, false, false, spec))
+                            .style(Style::default().bg(Color::Reset)),
+                        cr
+                    );
+                }
+            }
+        }
+        GameEvent::Dealt { seed } => {
+            let new_board = Board::deal_seeded(*seed);
+            
+            // source position (bottom right corner of tab_rect)
+            let sx = tab_rect.x + tab_rect.width.saturating_sub(spec.card_w());
+            let sy = tab_rect.y + tab_rect.height.saturating_sub(spec.card_h());
+            
+            let raw_t = anim.start_time.elapsed().as_secs_f32() / anim.duration.as_secs_f32();
+            let total_cards = 40;
+            
+            let mut i = 0;
+            for (col_idx, col) in new_board.columns.iter().enumerate() {
+                for (row_idx, &card) in col.iter().enumerate() {
+                    let cw = spec.card_w();
+                    let col_step = cw + 2;
+                    let dx = tab_rect.x + col_idx as u16 * col_step;
+                    let dy = tab_rect.y + 1 + row_idx as u16 * CARD_PEEK_ROWS as u16;
+
+                    let start_t = (i as f32) / (total_cards as f32) * 0.5;
+                    let duration_t = 0.5;
+
+                    if raw_t > start_t {
+                        let local_t = ((raw_t - start_t) / duration_t).clamp(0.0, 1.0);
+                        let p_i = style.interpolate(local_t);
+
+                        let cx = sx as f32 + (dx as f32 - sx as f32) * p_i;
+                        let cy = sy as f32 + (dy as f32 - sy as f32) * p_i;
+
+                        let x = cx.round() as u16;
+                        let y = cy.round() as u16;
+
+                        if x + spec.card_w() <= area_max_x && y + spec.card_h() <= area_max_y {
+                            let cr = Rect { x, y, width: spec.card_w(), height: spec.card_h() };
+                            frame.render_widget(Clear, cr);
+                            frame.render_widget(
+                                Paragraph::new(card_lines(card, false, false, spec))
+                                    .style(Style::default().bg(Color::Reset)),
+                                cr
+                            );
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1515,9 @@ pub trait TuiRendererExt {
     fn advance_hint(&mut self) -> bool;   // true = hint exhausted
     fn hint_next_move(&self) -> Option<SolverMove>;
     fn is_hint_active(&self) -> bool;
+    fn is_animating(&self) -> bool;
+    fn toggle_anim_speed(&mut self);
+    fn sync_board(&mut self, board: &Board);
     // Solving overlay
     fn show_solving(&mut self);
     fn hide_solving(&mut self);
@@ -1214,6 +1546,17 @@ impl TuiRendererExt for TuiRenderer {
     fn is_hint_active(&self) -> bool {
         self.hint.is_active()
     }
+    fn is_animating(&self) -> bool {
+        self.current_anim.is_some() || !self.anim_queue.is_empty()
+    }
+    fn toggle_anim_speed(&mut self) {
+        self.anim_speed = self.anim_speed.next();
+    }
+    fn sync_board(&mut self, board: &Board) {
+        self.anim_queue.clear();
+        self.current_anim = None;
+        self.anim_board = Some(board.clone());
+    }
     fn show_solving(&mut self) { self.solving = true; }
     fn hide_solving(&mut self) { self.solving = false; }
 }
@@ -1232,6 +1575,51 @@ impl Renderer for TuiRenderer {
         self.header_wins = total_wins;
         self.header_seed = seed;
     }
-    fn push_events(&mut self, _events: Vec<GameEvent>) { /* stub – future AnimationState */ }
-    fn tick(&mut self) { /* stub – future anim.tick() */ }
+    fn push_events(&mut self, events: Vec<GameEvent>) {
+        self.anim_queue.extend(events);
+    }
+
+    fn tick(&mut self) {
+        // Step 1: Advance current animation timeout
+        if let Some(anim) = &self.current_anim {
+            if anim.start_time.elapsed() >= anim.duration {
+                // Animation finished: apply event permanently to our visual board tracker
+                if let Some(board) = &mut self.anim_board {
+                    board.apply_event(&anim.event);
+                }
+                self.current_anim = None;
+            }
+        }
+
+        // Step 2: Pick next animation from queue
+        // We use a while loop so that if speed is Off, we can drain multiple events synchronously
+        while self.current_anim.is_none() {
+            if let Some(event) = self.anim_queue.pop_front() {
+                let scale = self.anim_speed.scale();
+                // Immediate events with no visual delay
+                if matches!(event, GameEvent::Won) || scale == 0.0 {
+                    if let Some(board) = &mut self.anim_board {
+                        board.apply_event(&event);
+                    }
+                } else {
+                    let base_ms = match &event {
+                        GameEvent::CardMoved { .. } => 150.0,
+                        GameEvent::StackMoved { .. } => 200.0,
+                        GameEvent::DragonsMerged { .. } => 300.0,
+                        GameEvent::Dealt { .. } => 800.0,
+                        _ => 0.0,
+                    };
+                    let duration = Duration::from_secs_f32((base_ms / 1000.0) * scale);
+                    self.current_anim = Some(ActiveAnimation {
+                        event,
+                        start_time: Instant::now(),
+                        duration,
+                    });
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
 }

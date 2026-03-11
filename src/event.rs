@@ -39,6 +39,8 @@ use crate::card::Card;
 pub enum GameEvent {
     /// A single card moved from one slot to another.
     CardMoved { card: Card, src: Location, dst: Location },
+    /// A valid sequence of cards moved between columns.
+    StackMoved { stack: Vec<Card>, src_col: usize, dst_col: usize },
     /// Four dragons of the same suit were merged and a free cell was locked.
     DragonsMerged { suit: crate::card::Suit, locked_cell: usize },
     /// The game has been won.

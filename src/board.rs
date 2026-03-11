@@ -232,8 +232,7 @@ impl Board {
 
         let card = self.take_card(src).unwrap();
         self.place_card(dst, card);
-        // Stub: events will be populated when animation support is added.
-        Ok(vec![])
+        Ok(vec![GameEvent::CardMoved { card, src, dst }])
     }
 
 
@@ -247,14 +246,14 @@ impl Board {
         match card {
             Card::Flower => {
                 self.flower_placed = true;
+                Ok(vec![GameEvent::CardMoved { card, src, dst: Location::Flower }])
             }
             Card::Numbered(suit, _) => {
                 self.foundations[suit_index(suit)] += 1;
+                Ok(vec![GameEvent::CardMoved { card, src, dst: Location::Foundation(suit) }])
             }
             _ => unreachable!(),
         }
-        // Stub: events will be populated when animation support is added.
-        Ok(vec![])
     }
 
 
@@ -322,15 +321,14 @@ impl Board {
         }
 
         // Lock one free cell with the dragon marker
-        let slot = self
+        let locked_cell = self
             .free_cells
-            .iter_mut()
-            .find(|fc| fc.is_empty())
+            .iter()
+            .position(|fc| fc.is_empty())
             .expect("We verified a free slot exists");
-        *slot = FreeCellState::DragonLocked(suit);
+        self.free_cells[locked_cell] = FreeCellState::DragonLocked(suit);
 
-        // Stub: events will be populated when animation support is added.
-        Ok(vec![])
+        Ok(vec![GameEvent::DragonsMerged { suit, locked_cell }])
     }
 
 
@@ -347,6 +345,7 @@ impl Board {
     /// on), matching the original game's heuristic.
     pub fn auto_move(&mut self) -> (usize, Vec<GameEvent>) {
         let mut moved = 0;
+        let mut events = Vec::new();
 
         // Iterate until no more moves are possible in one pass.
         loop {
@@ -360,7 +359,9 @@ impl Board {
 
             for src in sources {
                 if self.can_move_to_foundation(src) && self.is_safe_to_auto(src) {
-                    let _ = self.move_to_foundation(src);
+                    if let Ok(mut evs) = self.move_to_foundation(src) {
+                        events.append(&mut evs);
+                    }
                     moved += 1;
                 }
             }
@@ -370,8 +371,7 @@ impl Board {
             }
         }
 
-        // Stub: events will be populated when animation support is added.
-        (moved, vec![])
+        (moved, events)
     }
 
 
@@ -442,7 +442,7 @@ impl Board {
         src_col: usize,
         start_idx: usize,
         dst_col: usize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<Vec<GameEvent>, &'static str> {
         if src_col == dst_col {
             return Err("Source and destination columns are the same");
         }
@@ -470,8 +470,13 @@ impl Board {
 
         // Execute the move.
         let stack: Vec<Card> = self.columns[src_col].drain(start_idx..).collect();
+        let events = vec![GameEvent::StackMoved {
+            stack: stack.clone(),
+            src_col,
+            dst_col,
+        }];
         self.columns[dst_col].extend(stack);
-        Ok(())
+        Ok(events)
     }
 
     // -------------------------------------------------------------------------
@@ -502,6 +507,43 @@ impl Board {
             // Placing to Foundation/Flower is handled by move_to_foundation, not here.
             Location::Foundation(_) | Location::Flower => {
                 panic!("place_card called with Foundation/Flower; use move_to_foundation instead");
+            }
+        }
+    }
+
+    /// Apply an atomic GameEvent directly to the board's state without validation.
+    /// Used by the rendering layer to advance animations linearly.
+    pub fn apply_event(&mut self, event: &GameEvent) {
+        match event {
+            GameEvent::CardMoved { card, src, dst } => {
+                let taken = self.take_card(*src).unwrap();
+                debug_assert_eq!(taken, *card);
+                match dst {
+                    Location::Foundation(suit) => self.foundations[suit_index(*suit)] += 1,
+                    Location::Flower => self.flower_placed = true,
+                    _ => self.place_card(*dst, taken),
+                }
+            }
+            GameEvent::StackMoved { stack, src_col, dst_col } => {
+                let col = &mut self.columns[*src_col];
+                let split_at = col.len() - stack.len();
+                let taken: Vec<Card> = col.drain(split_at..).collect();
+                debug_assert_eq!(&taken, stack);
+                self.columns[*dst_col].extend(taken);
+            }
+            GameEvent::DragonsMerged { suit, locked_cell } => {
+                let dragon = Card::Dragon(*suit);
+                for col in self.columns.iter_mut() {
+                    if col.last() == Some(&dragon) { col.pop(); }
+                }
+                for fc in self.free_cells.iter_mut() {
+                    if *fc == FreeCellState::Card(dragon) { *fc = FreeCellState::Empty; }
+                }
+                self.free_cells[*locked_cell] = FreeCellState::DragonLocked(*suit);
+            }
+            GameEvent::Won => {}
+            GameEvent::Dealt { seed } => {
+                *self = Board::deal_seeded(*seed);
             }
         }
     }

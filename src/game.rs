@@ -27,6 +27,7 @@ use crossterm::event::{self as ct_event, Event};
 
 
 use crate::board::{Board, Location};
+use crate::event::GameEvent;
 use crate::command::{parse_command, Command};
 use crate::renderer::Renderer;
 use crate::history::{History, GameRecord};
@@ -192,6 +193,7 @@ impl<R: Renderer> Game<R> {
     {
         // Initial auto-move + render
         self.renderer.info("Press ? for help.");
+        self.renderer.push_events(vec![GameEvent::Dealt { seed: self.board.seed }]);
         let (n, events) = self.board.auto_move();
         self.renderer.push_events(events);
         if n > 0 {
@@ -208,11 +210,23 @@ impl<R: Renderer> Game<R> {
                         // only handle Press (and Repeat for held keys).
                         use crossterm::event::KeyEventKind;
                         if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
-                            self.handle_tui_key(key);
+                            if !self.renderer.is_animating() {
+                                self.handle_tui_key(key);
+                            } else {
+                                use crossterm::event::{KeyCode, KeyModifiers};
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    match key.code {
+                                        KeyCode::Char('c') | KeyCode::Char('d') => { self.should_quit = true; }
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
                     }
                     Ok(Event::Mouse(me)) => {
-                        self.handle_tui_mouse(me);
+                        if !self.renderer.is_animating() {
+                            self.handle_tui_mouse(me);
+                        }
                     }
                     _ => {}
                 }
@@ -269,6 +283,7 @@ impl<R: Renderer> Game<R> {
                     // Undo
                     if let Some(prev) = self.history.pop() {
                         self.board = prev;
+                        self.renderer.sync_board(&self.board);
                         self.renderer.clear_status_log();
                         self.renderer.info("Undo.");
                     } else {
@@ -276,6 +291,8 @@ impl<R: Renderer> Game<R> {
                     }
                 } else if c == 'n' || c == 'N' {
                     self.tui_new_game();
+                } else if c == 's' || c == 'S' {
+                    self.renderer.toggle_anim_speed();
                 } else if c == '?' {
                     self.renderer.toggle_help();
                 } else if c == 'h' || c == 'H' {
@@ -362,7 +379,10 @@ impl<R: Renderer> Game<R> {
                     let start_idx = col_len.saturating_sub(depth);
                     self.save_history();
                     match self.board.move_stack(col, start_idx, dst_col) {
-                        Ok(()) => { self.tui_post_move(); }
+                        Ok(events) => {
+                            self.renderer.push_events(events);
+                            self.tui_post_move();
+                        }
                         Err(e) => {
                             self.renderer.error(e);
                             self.history.pop();
@@ -399,6 +419,7 @@ impl<R: Renderer> Game<R> {
                 if c == 'z' || c == 'Z' {
                     if let Some(prev) = self.history.pop() {
                         self.board = prev;
+                        self.renderer.sync_board(&self.board);
                         self.renderer.clear_status_log();
                         self.renderer.info("Undo.");
                         // Deviation from hint on undo
@@ -444,6 +465,7 @@ impl<R: Renderer> Game<R> {
                 if c == 'z' || c == 'Z' {
                     if let Some(prev) = self.history.pop() {
                         self.board = prev;
+                        self.renderer.sync_board(&self.board);
                         self.renderer.clear_status_log();
                         self.renderer.info("Undo.");
                         // Deviation from hint on undo
@@ -496,11 +518,15 @@ impl<R: Renderer> Game<R> {
                     match loc {
                         crate::board::Location::Column(dst_col) if dst_col != src_col => {
                             self.save_history();
-                            if let Err(e) = self.board.move_stack(src_col, start_idx, dst_col) {
-                                self.renderer.error(e);
-                                self.history.pop();
-                            } else {
-                                self.tui_post_move();
+                            match self.board.move_stack(src_col, start_idx, dst_col) {
+                                Ok(events) => {
+                                    self.renderer.push_events(events);
+                                    self.tui_post_move();
+                                }
+                                Err(e) => {
+                                    self.renderer.error(e);
+                                    self.history.pop();
+                                }
                             }
                             self.renderer.set_selection(SelectionState::Idle);
                         }
@@ -718,6 +744,7 @@ impl<R: Renderer> Game<R> {
         self.board = Board::deal_random();
         self.history.clear();
         self.renderer.clear_hint();
+        self.renderer.push_events(vec![GameEvent::Dealt { seed: self.board.seed }]);
 
         let initial_board = self.board.clone();
         let (n, events) = self.board.auto_move();
@@ -840,7 +867,7 @@ impl<R: Renderer> Game<R> {
                 };
 
                 match self.board.move_stack(src, abs_idx, dst) {
-                    Ok(()) => {}
+                    Ok(_) => {}
                     Err(e) => {
                         self.renderer.error(e);
                         self.history.pop();
