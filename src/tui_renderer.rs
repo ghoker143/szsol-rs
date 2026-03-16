@@ -286,6 +286,8 @@ fn char_count(text: &str) -> usize {
 }
 
 pub const CARD_PEEK_ROWS: usize = 2;
+const MIN_TUI_WIDTH: u16 = 86;
+const MIN_TUI_HEIGHT: u16 = 17;
 
 /// Render a full CARD_H-row card.
 ///
@@ -624,7 +626,7 @@ impl TuiRenderer {
                 GameEvent::CardMoved { src, .. } => (Some(*src), None, None, false),
                 GameEvent::DragonsMerged { suit, .. } => (None, Some(*suit), None, false),
                 GameEvent::StackMoved { stack, src_col, .. } => (None, None, Some((*src_col, stack.len())), false),
-                GameEvent::Dealt { .. } => (None, None, None, true),
+                GameEvent::Dealt { .. } | GameEvent::RestoreDealt { .. } => (None, None, None, true),
                 _ => (None, None, None, false),
             },
             None => (None, None, None, false),
@@ -692,6 +694,10 @@ impl TuiRenderer {
 
         let _ = self.terminal.draw(|frame| {
             let area = frame.area();
+            if area.width < MIN_TUI_WIDTH || area.height < MIN_TUI_HEIGHT {
+                render_too_small(frame, area, wins, seed);
+                return;
+            }
             let top_row_h = spec.card_h() + 1; // cards + key-label row
 
             let root = Layout::default()
@@ -729,6 +735,34 @@ impl TuiRenderer {
 // ---------------------------------------------------------------------------
 // Sub-renderers
 // ---------------------------------------------------------------------------
+
+fn render_too_small(frame: &mut Frame, area: Rect, wins: usize, seed: u64) {
+    let lines = vec![
+        Line::from(Span::styled(
+            " Screen too small ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(format!(" Current size: {}x{}", area.width, area.height)),
+        Line::from(format!(" Required size: at least {}x{}", MIN_TUI_WIDTH, MIN_TUI_HEIGHT)),
+        Line::from(""),
+        Line::from(" Resize the terminal to continue."),
+        Line::from(" The game is still running and will redraw automatically."),
+        Line::from(""),
+        Line::from(format!(" Seed: {}   Wins: {}", seed, wins)),
+    ];
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" szsol-rs ")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        ),
+        area,
+    );
+}
 
 fn render_header_bar(frame: &mut Frame, area: Rect, wins: usize, seed: u64) {
     let rank = match wins {
@@ -1477,6 +1511,51 @@ fn render_animation_overlay(
                 }
             }
         }
+        GameEvent::RestoreDealt { board: restored_board } => {
+            let new_board = restored_board;
+            
+            // source position (bottom right corner of tab_rect)
+            let sx = tab_rect.x + tab_rect.width.saturating_sub(spec.card_w());
+            let sy = tab_rect.y + tab_rect.height.saturating_sub(spec.card_h());
+            
+            let raw_t = anim.start_time.elapsed().as_secs_f32() / anim.duration.as_secs_f32();
+            let total_cards = 40;
+            
+            let mut i = 0;
+            for (col_idx, col) in new_board.columns.iter().enumerate() {
+                for (row_idx, &card) in col.iter().enumerate() {
+                    let cw = spec.card_w();
+                    let col_step = cw + 2;
+                    let dx = tab_rect.x + col_idx as u16 * col_step;
+                    let dy = tab_rect.y + 1 + row_idx as u16 * CARD_PEEK_ROWS as u16;
+
+                    let start_t = (i as f32) / (total_cards as f32) * 0.5;
+                    let duration_t = 0.5;
+
+                    if raw_t > start_t {
+                        let local_t = ((raw_t - start_t) / duration_t).clamp(0.0, 1.0);
+                        let p_i = style.interpolate(local_t);
+
+                        let cx = sx as f32 + (dx as f32 - sx as f32) * p_i;
+                        let cy = sy as f32 + (dy as f32 - sy as f32) * p_i;
+
+                        let x = cx.round() as u16;
+                        let y = cy.round() as u16;
+
+                        if x + spec.card_w() <= area_max_x && y + spec.card_h() <= area_max_y {
+                            let cr = Rect { x, y, width: spec.card_w(), height: spec.card_h() };
+                            frame.render_widget(Clear, cr);
+                            frame.render_widget(
+                                Paragraph::new(card_lines(card, false, false, spec))
+                                    .style(Style::default().bg(Color::Reset)),
+                                cr
+                            );
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1517,6 +1596,8 @@ pub trait TuiRendererExt {
     fn is_hint_active(&self) -> bool;
     fn is_animating(&self) -> bool;
     fn toggle_anim_speed(&mut self);
+    fn set_anim_speed(&mut self, speed: AnimSpeed);
+    fn anim_speed(&self) -> AnimSpeed;
     fn sync_board(&mut self, board: &Board);
     // Solving overlay
     fn show_solving(&mut self);
@@ -1551,6 +1632,12 @@ impl TuiRendererExt for TuiRenderer {
     }
     fn toggle_anim_speed(&mut self) {
         self.anim_speed = self.anim_speed.next();
+    }
+    fn set_anim_speed(&mut self, speed: AnimSpeed) {
+        self.anim_speed = speed;
+    }
+    fn anim_speed(&self) -> AnimSpeed {
+        self.anim_speed
     }
     fn sync_board(&mut self, board: &Board) {
         self.anim_queue.clear();
@@ -1606,7 +1693,7 @@ impl Renderer for TuiRenderer {
                         GameEvent::CardMoved { .. } => 150.0,
                         GameEvent::StackMoved { .. } => 200.0,
                         GameEvent::DragonsMerged { .. } => 300.0,
-                        GameEvent::Dealt { .. } => 800.0,
+                        GameEvent::Dealt { .. } | GameEvent::RestoreDealt { .. } => 800.0,
                         _ => 0.0,
                     };
                     let duration = Duration::from_secs_f32((base_ms / 1000.0) * scale);

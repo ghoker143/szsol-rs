@@ -38,6 +38,7 @@ type HmacSha256 = Hmac<Sha256>;
 // (e.g. from a crash mid-write) so we never silently load a broken save.
 const SECRET_KEY: &[u8] = b"szsol_secret_key_123_do_not_cheat";
 const HMAC_SIZE: usize = 32;
+const SNAPSHOT_COUNT: usize = 3;
 
 /// A single recorded game session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +87,8 @@ impl History {
         if !path.exists() {
             return Self::default();
         }
+
+        Self::snapshot_current_file(&path);
 
         let mut file = match File::open(&path) {
             Ok(f) => f,
@@ -179,5 +182,54 @@ impl History {
     fn file_path() -> Option<PathBuf> {
         let proj_dirs = ProjectDirs::from("com", "szsol", "szsol")?;
         Some(proj_dirs.data_dir().join("history.dat"))
+    }
+
+    fn snapshot_current_file(path: &PathBuf) {
+        if Self::same_as_latest_snapshot(path) {
+            return;
+        }
+
+        for idx in (1..=SNAPSHOT_COUNT).rev() {
+            let src = Self::snapshot_path(path, idx);
+            let dst = Self::snapshot_path(path, idx + 1);
+
+            if idx == SNAPSHOT_COUNT {
+                let _ = fs::remove_file(&src);
+            } else if src.exists() {
+                let _ = fs::rename(&src, &dst);
+            }
+        }
+
+        let newest = Self::snapshot_path(path, 1);
+        let _ = fs::copy(path, newest);
+    }
+
+    fn snapshot_path(path: &PathBuf, idx: usize) -> PathBuf {
+        let mut snapshot = path.clone().into_os_string();
+        snapshot.push(format!(".bak{idx}"));
+        PathBuf::from(snapshot)
+    }
+
+    fn same_as_latest_snapshot(path: &PathBuf) -> bool {
+        let latest = Self::snapshot_path(path, 1);
+        let Ok(current_meta) = fs::metadata(path) else {
+            return false;
+        };
+        let Ok(latest_meta) = fs::metadata(&latest) else {
+            return false;
+        };
+
+        if current_meta.len() != latest_meta.len() {
+            return false;
+        }
+
+        let Ok(current) = fs::read(path) else {
+            return false;
+        };
+        let Ok(previous) = fs::read(latest) else {
+            return false;
+        };
+
+        current == previous
     }
 }

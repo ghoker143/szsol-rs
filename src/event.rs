@@ -21,6 +21,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 use crate::board::Location;
+use crate::board::Board;
 
 use crate::card::Card;
 
@@ -47,4 +48,6 @@ pub enum GameEvent {
     Won,
     /// A new game was dealt with the given seed.
     Dealt { seed: u64 },
+    /// A saved game is being restored with a deal-style animation into the current board.
+    RestoreDealt { board: Board },
 }

@@ -545,7 +545,9 @@ impl Board {
             GameEvent::Dealt { seed } => {
                 *self = Board::deal_seeded(*seed);
             }
+            GameEvent::RestoreDealt { board } => {
+                *self = board.clone();
+            }
         }
     }
 }
-

@@ -23,6 +23,7 @@
 mod solver;
 mod board;
 mod card;
+mod config;
 mod command;
 mod event;
 mod game;

@@ -27,6 +27,7 @@ use crossterm::event::{self as ct_event, Event};
 
 
 use crate::board::{Board, Location};
+use crate::config::AppConfig;
 use crate::event::GameEvent;
 use crate::command::{parse_command, Command};
 use crate::renderer::Renderer;
@@ -40,6 +41,8 @@ pub struct Game<R: Renderer> {
     renderer: R,
     history: Vec<Board>, // for undo
     save_data: History,
+    app_config: AppConfig,
+    resumed_on_start: bool,
     should_quit: bool,
     last_tui_click: Option<(Location, Instant)>,
 }
@@ -48,6 +51,7 @@ pub struct Game<R: Renderer> {
 impl<R: Renderer> Game<R> {
     pub fn init(seed: Option<u64>, mut renderer: R) -> Self {
         let mut save_data = History::load();
+        let app_config = AppConfig::load();
         
         // 1. Check if we can resume the last game
         let mut resumed_board = None;
@@ -86,6 +90,7 @@ impl<R: Renderer> Game<R> {
             }
         }
 
+        let resumed_on_start = resumed_board.is_some();
         let board = match resumed_board {
             Some(b) => b,
             None => {
@@ -111,6 +116,8 @@ impl<R: Renderer> Game<R> {
             renderer,
             history: resumed_history,
             save_data,
+            app_config,
+            resumed_on_start,
             should_quit: false,
             last_tui_click: None,
         }
@@ -193,7 +200,12 @@ impl<R: Renderer> Game<R> {
     {
         // Initial auto-move + render
         self.renderer.info("Press ? for help.");
-        self.renderer.push_events(vec![GameEvent::Dealt { seed: self.board.seed }]);
+        self.renderer.set_anim_speed(self.app_config.anim_speed);
+        if self.resumed_on_start {
+            self.renderer.push_events(vec![GameEvent::RestoreDealt { board: self.board.clone() }]);
+        } else {
+            self.renderer.push_events(vec![GameEvent::Dealt { seed: self.board.seed }]);
+        }
         let (n, events) = self.board.auto_move();
         self.renderer.push_events(events);
         if n > 0 {
@@ -293,6 +305,8 @@ impl<R: Renderer> Game<R> {
                     self.tui_new_game();
                 } else if c == 's' || c == 'S' {
                     self.renderer.toggle_anim_speed();
+                    self.app_config.anim_speed = self.renderer.anim_speed();
+                    self.app_config.save();
                 } else if c == '?' {
                     self.renderer.toggle_help();
                 } else if c == 'h' || c == 'H' {
