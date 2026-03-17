@@ -348,6 +348,7 @@ impl<R: Renderer> Game<R> {
                         }
                         match result {
                             None => {
+                                self.renderer.show_solver_failed();
                                 self.renderer.error("No solution found for current board.");
                             }
                             Some(solution) => {

@@ -537,6 +537,7 @@ pub struct TuiRenderer {
     solving_message: String,
     solving_progress: u16,
     solving_frame: usize,
+    solver_failed_until: Option<Instant>,
     spec:        CardSpec,
     pub hint:    HintState,
     // Animation state
@@ -568,6 +569,7 @@ impl TuiRenderer {
             solving_message: "少女祈祷中".to_string(),
             solving_progress: 0,
             solving_frame: 0,
+            solver_failed_until: None,
             spec,
             hint: HintState::Inactive,
             anim_queue: VecDeque::new(),
@@ -694,6 +696,10 @@ impl TuiRenderer {
         let solving_message = self.solving_message.clone();
         let solving_progress = self.solving_progress;
         let solving_frame = self.solving_frame;
+        let solver_failed = self
+            .solver_failed_until
+            .map(|until| Instant::now() < until)
+            .unwrap_or(false);
         let speed = self.anim_speed;
 
         let mut new_layout = BoardLayout::default();
@@ -727,6 +733,7 @@ impl TuiRenderer {
 
             if show_help { render_help_overlay(frame, area); }
             if solving   { render_solving_overlay(frame, area, &solving_message, solving_progress, solving_frame); }
+            if solver_failed { render_solver_failed_overlay(frame, area); }
 
             if let (Some(mv), Some(dst_loc)) = (hint_mv, hint_dst) {
                 render_hint_arrow(frame, &new_layout, mv, &board_for_arrow, dst_loc, spec);
@@ -1323,6 +1330,37 @@ fn render_solving_overlay(frame: &mut Frame, area: Rect, _message: &str, progres
     );
 }
 
+fn render_solver_failed_overlay(frame: &mut Frame, area: Rect) {
+    let w = 28u16.min(area.width);
+    let h = 5u16.min(area.height);
+    let popup = Rect {
+        x: area.width.saturating_sub(w) / 2,
+        y: area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(symbols::border::ROUNDED)
+        .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        .title(Span::styled(" Solver ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No solution found  ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )),
+        ]),
+        inner,
+    );
+}
+
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let w = 68u16.min(area.width);
     let h = 22u16.min(area.height);
@@ -1647,6 +1685,7 @@ pub trait TuiRendererExt {
     fn show_solving(&mut self);
     fn hide_solving(&mut self);
     fn update_solving_progress(&mut self, progress: SolverProgress);
+    fn show_solver_failed(&mut self);
 }
 
 impl TuiRendererExt for TuiRenderer {
@@ -1714,6 +1753,9 @@ impl TuiRendererExt for TuiRenderer {
         self.solving_progress = progress.percent();
         self.solving_frame = self.solving_frame.wrapping_add(1);
     }
+    fn show_solver_failed(&mut self) {
+        self.solver_failed_until = Some(Instant::now() + Duration::from_millis(1600));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,6 +1777,14 @@ impl Renderer for TuiRenderer {
     }
 
     fn tick(&mut self) {
+        if self
+            .solver_failed_until
+            .map(|until| Instant::now() >= until)
+            .unwrap_or(false)
+        {
+            self.solver_failed_until = None;
+        }
+
         // Step 1: Advance current animation timeout
         if let Some(anim) = &self.current_anim {
             if anim.start_time.elapsed() >= anim.duration {
