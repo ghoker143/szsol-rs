@@ -20,12 +20,99 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::board::{Board, Location, NUM_COLUMNS, NUM_FREE_CELLS};
 use crate::card::Suit;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub const NODE_LIMIT: usize = 500_000;
+pub const PROGRESS_INTERVAL: usize = 2_000;
+
+#[derive(Debug, Clone, Copy)]
+pub enum SolverFailure {
+    NodeLimit,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SolverProgress {
+    Started { node_limit: usize },
+    CacheHit { seed: u64, remaining_moves: usize },
+    CacheMiss { seed: u64 },
+    Progress { nodes_explored: usize, node_limit: usize },
+    Finished { solution_len: usize, nodes_explored: usize },
+    Failed { nodes_explored: usize, node_limit: usize, reason: SolverFailure },
+}
+
+impl SolverProgress {
+    pub fn nodes_explored(self) -> usize {
+        match self {
+            SolverProgress::Started { .. } => 0,
+            SolverProgress::CacheHit { .. } => 0,
+            SolverProgress::CacheMiss { .. } => 0,
+            SolverProgress::Progress { nodes_explored, .. } => nodes_explored,
+            SolverProgress::Finished { nodes_explored, .. } => nodes_explored,
+            SolverProgress::Failed { nodes_explored, .. } => nodes_explored,
+        }
+    }
+
+    pub fn node_limit(self) -> usize {
+        match self {
+            SolverProgress::Started { node_limit } => node_limit,
+            SolverProgress::CacheHit { .. } => NODE_LIMIT,
+            SolverProgress::CacheMiss { .. } => NODE_LIMIT,
+            SolverProgress::Progress { node_limit, .. } => node_limit,
+            SolverProgress::Finished { .. } => NODE_LIMIT,
+            SolverProgress::Failed { node_limit, .. } => node_limit,
+        }
+    }
+
+    pub fn percent(self) -> u16 {
+        if matches!(self, SolverProgress::Finished { .. } | SolverProgress::CacheHit { .. }) {
+            return 100;
+        }
+
+        let limit = self.node_limit().max(1);
+        ((self.nodes_explored().saturating_mul(100)) / limit).min(100) as u16
+    }
+
+    pub fn message(self) -> String {
+        match self {
+            SolverProgress::Started { .. } => "Solver: started A* search.".to_string(),
+            SolverProgress::CacheHit { seed, remaining_moves } => format!(
+                "Solver: cache hit for seed {}. Reusing remaining solution ({} moves).",
+                seed, remaining_moves
+            ),
+            SolverProgress::CacheMiss { seed } => format!(
+                "Solver: cached solution for seed {} does not match current board. Keeping cache and recomputing.",
+                seed
+            ),
+            SolverProgress::Progress { nodes_explored, .. } => {
+                format!("Solver: {} / {} nodes explored.", nodes_explored, NODE_LIMIT)
+            }
+            SolverProgress::Finished { solution_len, nodes_explored } => format!(
+                "Solver: found solution in {} moves after exploring {} nodes.",
+                solution_len, nodes_explored
+            ),
+            SolverProgress::Failed { nodes_explored, reason, .. } => match reason {
+                SolverFailure::NodeLimit => format!(
+                    "Solver: node limit ({}) reached after exploring {} nodes.",
+                    NODE_LIMIT, nodes_explored
+                ),
+                SolverFailure::Exhausted => format!(
+                    "Solver: search exhausted after exploring {} nodes.",
+                    nodes_explored
+                ),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SolverMove {
     /// `depth_from_top`: 0 = only the top card, 1 = top two cards, etc.
     /// This matches the game's command syntax: `cc src:depth dst`.
@@ -176,6 +263,52 @@ impl Board {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SolverCache {
+    entries: HashMap<u64, SolverSolution>,
+}
+
+pub type SolverSolution = Vec<SolverStep>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolverStep {
+    pub board_hash: String,
+    pub next_move: SolverMove,
+}
+
+impl SolverCache {
+    fn global() -> &'static Mutex<SolverCache> {
+        static CACHE: OnceLock<Mutex<SolverCache>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(SolverCache::default()))
+    }
+}
+
+fn board_hash(board: &Board) -> String {
+    let payload = bincode::serialize(board).expect("board serialization should succeed");
+    let digest = Sha256::digest(payload);
+    hex_digest(&digest)
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn find_remaining_solution(current_board: &Board, cached: &SolverSolution) -> Option<SolverSolution> {
+    let target_hash = board_hash(current_board);
+    for (idx, step) in cached.iter().enumerate() {
+        if step.board_hash == target_hash {
+            return Some(cached[idx..].to_vec());
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Heuristic evaluation
 // ---------------------------------------------------------------------------
@@ -257,8 +390,14 @@ struct SearchNode {
     neg_f: i32,
     /// Number of moves made so far (g cost).
     g: u32,
+    node_id: usize,
+}
+
+struct SearchRecord {
     board: Board,
-    path: Vec<SolverMove>,
+    parent: Option<usize>,
+    incoming_move: Option<SolverMove>,
+    board_hash: String,
 }
 
 impl PartialEq for SearchNode {
@@ -279,42 +418,108 @@ impl Ord for SearchNode {
     }
 }
 
+fn reconstruct_solution(records: &[SearchRecord], mut node_id: usize) -> SolverSolution {
+    let mut steps_rev = Vec::new();
+
+    while let Some(parent_id) = records[node_id].parent {
+        let next_move = records[node_id]
+            .incoming_move
+            .expect("child record must have incoming move");
+        steps_rev.push(SolverStep {
+            board_hash: records[parent_id].board_hash.clone(),
+            next_move,
+        });
+        node_id = parent_id;
+    }
+
+    steps_rev.reverse();
+    steps_rev
+}
+
 // ---------------------------------------------------------------------------
 // A* solver
 // ---------------------------------------------------------------------------
 
 /// A* pathfinding solver.
 ///
-/// A* pathfinding solver. `log` receives progress messages — pass `|s| println!("{}", s)`
-/// for CLI output or `|_| {}` to suppress output (TUI mode).
-pub fn solve<F: FnMut(&str)>(initial_board: &Board, mut log: F) -> Option<Vec<SolverMove>> {
+/// A* pathfinding solver. `progress` receives structured solver updates.
+/// Return `false` from `progress` to abort the search early.
+pub fn solve<F: FnMut(SolverProgress) -> bool>(initial_board: &Board, mut progress: F) -> Option<SolverSolution> {
+    if !progress(SolverProgress::Started { node_limit: NODE_LIMIT }) {
+        return None;
+    }
+
+    if let Some(cached) = SolverCache::global()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(&initial_board.seed).cloned())
+    {
+        if let Some(remaining_solution) = find_remaining_solution(initial_board, &cached) {
+            let _ = progress(SolverProgress::CacheHit {
+                seed: initial_board.seed,
+                remaining_moves: remaining_solution.len(),
+            });
+            return Some(remaining_solution);
+        }
+
+        if !progress(SolverProgress::CacheMiss { seed: initial_board.seed }) {
+            return None;
+        }
+    }
+
     let mut heap: BinaryHeap<SearchNode> = BinaryHeap::new();
+    let mut records: Vec<SearchRecord> = Vec::new();
     let mut visited: HashSet<Board> = HashSet::new();
 
     let mut start = initial_board.clone();
     let _ = start.auto_move();
 
     let h0 = heuristic(&start);
-    heap.push(SearchNode { neg_f: h0, g: 0, board: start.clone(), path: Vec::new() });
+    records.push(SearchRecord {
+        board: start.clone(),
+        parent: None,
+        incoming_move: None,
+        board_hash: board_hash(&start),
+    });
+    heap.push(SearchNode {
+        neg_f: h0,
+        g: 0,
+        node_id: 0,
+    });
     visited.insert(start);
 
     let mut nodes_explored = 0usize;
-    const NODE_LIMIT: usize = 500_000;
-
-    while let Some(SearchNode { board: state, path, g, .. }) = heap.pop() {
+    while let Some(SearchNode { node_id, g, .. }) = heap.pop() {
+        let state = records[node_id].board.clone();
         if state.is_won() {
-            log(&format!("\nSolver: Found solution in {} moves! Explored {} nodes.", path.len(), nodes_explored));
-            return Some(path);
+            let solution = reconstruct_solution(&records, node_id);
+            if let Ok(mut cache) = SolverCache::global().lock() {
+                cache.entries.insert(initial_board.seed, solution.clone());
+            }
+            let _ = progress(SolverProgress::Finished {
+                solution_len: solution.len(),
+                nodes_explored,
+            });
+            return Some(solution);
         }
 
         nodes_explored += 1;
         if nodes_explored > NODE_LIMIT {
-            log(&format!("\nSolver: Node limit ({}) reached. No solution found.", NODE_LIMIT));
+            let _ = progress(SolverProgress::Failed {
+                nodes_explored,
+                node_limit: NODE_LIMIT,
+                reason: SolverFailure::NodeLimit,
+            });
             return None;
         }
 
-        if nodes_explored % 10_000 == 0 {
-            log(&format!("  ... {} nodes explored so far", nodes_explored));
+        if nodes_explored % PROGRESS_INTERVAL == 0 {
+            if !progress(SolverProgress::Progress {
+                nodes_explored,
+                node_limit: NODE_LIMIT,
+            }) {
+                return None;
+            }
         }
 
         for m in state.valid_moves() {
@@ -325,14 +530,23 @@ pub fn solve<F: FnMut(&str)>(initial_board: &Board, mut log: F) -> Option<Vec<So
                 let g_next = g + 1;
                 let h = heuristic(&next);
                 let neg_f = h - g_next as i32;
-
-                let mut next_path = path.clone();
-                next_path.push(m);
-                heap.push(SearchNode { neg_f, g: g_next, board: next, path: next_path });
+                let next_hash = board_hash(&next);
+                let next_id = records.len();
+                records.push(SearchRecord {
+                    board: next,
+                    parent: Some(node_id),
+                    incoming_move: Some(m),
+                    board_hash: next_hash,
+                });
+                heap.push(SearchNode { neg_f, g: g_next, node_id: next_id });
             }
         }
     }
 
-    log(&format!("\nSolver: Search exhausted ({} nodes), no solution found.", nodes_explored));
+    let _ = progress(SolverProgress::Failed {
+        nodes_explored,
+        node_limit: NODE_LIMIT,
+        reason: SolverFailure::Exhausted,
+    });
     None
 }

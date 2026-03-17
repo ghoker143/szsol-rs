@@ -32,9 +32,10 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
+    symbols,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph},
     Frame, Terminal,
 };
 
@@ -42,7 +43,7 @@ use crate::board::{Board, FreeCellState, Location, NUM_COLUMNS, NUM_FREE_CELLS};
 use crate::card::{Card, Suit};
 use crate::event::GameEvent;
 use crate::renderer::Renderer;
-use crate::solver::SolverMove;
+use crate::solver::{SolverMove, SolverProgress};
 
 // ---------------------------------------------------------------------------
 // Key bindings
@@ -533,6 +534,9 @@ pub struct TuiRenderer {
     header_seed: u64,
     show_help:   bool,
     solving:     bool,
+    solving_message: String,
+    solving_progress: u16,
+    solving_frame: usize,
     spec:        CardSpec,
     pub hint:    HintState,
     // Animation state
@@ -561,6 +565,9 @@ impl TuiRenderer {
             header_seed: 0,
             show_help: false,
             solving: false,
+            solving_message: "少女祈祷中".to_string(),
+            solving_progress: 0,
+            solving_frame: 0,
             spec,
             hint: HintState::Inactive,
             anim_queue: VecDeque::new(),
@@ -684,6 +691,9 @@ impl TuiRenderer {
             _                               => None,
         };
         let solving = self.solving;
+        let solving_message = self.solving_message.clone();
+        let solving_progress = self.solving_progress;
+        let solving_frame = self.solving_frame;
         let speed = self.anim_speed;
 
         let mut new_layout = BoardLayout::default();
@@ -716,7 +726,7 @@ impl TuiRenderer {
             render_statusbar(frame, root[3], &log, &sel, hint_active, speed);
 
             if show_help { render_help_overlay(frame, area); }
-            if solving   { render_solving_overlay(frame, area); }
+            if solving   { render_solving_overlay(frame, area, &solving_message, solving_progress, solving_frame); }
 
             if let (Some(mv), Some(dst_loc)) = (hint_mv, hint_dst) {
                 render_hint_arrow(frame, &new_layout, mv, &board_for_arrow, dst_loc, spec);
@@ -1254,8 +1264,19 @@ fn render_statusbar(
     );
 }
 
-fn render_solving_overlay(frame: &mut Frame, area: Rect) {
-    let w = 28u16.min(area.width);
+fn render_solving_overlay(frame: &mut Frame, area: Rect, _message: &str, progress: u16, frame_idx: usize) {
+    const FRAMES: [&str; 8] = [
+        "(>_<)  .",
+        "(>_<)  *",
+        "(-_-)  .",
+        "(-_-)  *",
+        "(u_u)  .",
+        "(u_u)  *",
+        "(-_-)  .",
+        "(-_-)  *",
+    ];
+
+    let w = 30u16.min(area.width);
     let h = 5u16.min(area.height);
     let popup = Rect {
         x: area.width.saturating_sub(w) / 2,
@@ -1265,18 +1286,41 @@ fn render_solving_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(symbols::border::ROUNDED)
         .border_style(Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD))
         .title(Span::styled(" Solver ", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "  ⧖ Solving… please wait  ",
-            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
-        )),
-    ];
-    frame.render_widget(Paragraph::new(lines), inner);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {} ", FRAMES[frame_idx % FRAMES.len()]),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "少女祈祷中",
+                Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        chunks[0],
+    );
+
+    frame.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(Color::LightYellow).bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .label(format!("{}%", progress))
+            .percent(progress),
+        chunks[1],
+    );
 }
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
@@ -1602,6 +1646,7 @@ pub trait TuiRendererExt {
     // Solving overlay
     fn show_solving(&mut self);
     fn hide_solving(&mut self);
+    fn update_solving_progress(&mut self, progress: SolverProgress);
 }
 
 impl TuiRendererExt for TuiRenderer {
@@ -1644,8 +1689,31 @@ impl TuiRendererExt for TuiRenderer {
         self.current_anim = None;
         self.anim_board = Some(board.clone());
     }
-    fn show_solving(&mut self) { self.solving = true; }
+    fn show_solving(&mut self) {
+        self.solving = true;
+        self.solving_message = "少女祈祷中".to_string();
+        self.solving_progress = 0;
+        self.solving_frame = 0;
+    }
     fn hide_solving(&mut self) { self.solving = false; }
+    fn update_solving_progress(&mut self, progress: SolverProgress) {
+        self.solving_message = match progress {
+            SolverProgress::Started { .. } => "正在整理牌堆与搜索空间".to_string(),
+            SolverProgress::CacheHit { remaining_moves, .. } => {
+                format!("命中缓存解，还剩 {} 步", remaining_moves)
+            }
+            SolverProgress::CacheMiss { .. } => "当前局面不在缓存路径上，重新搜索".to_string(),
+            SolverProgress::Progress { nodes_explored, node_limit } => {
+                format!("已搜索 {} / {} 个状态", nodes_explored, node_limit)
+            }
+            SolverProgress::Finished { solution_len, .. } => {
+                format!("找到解了，共 {} 步", solution_len)
+            }
+            SolverProgress::Failed { .. } => "没有找到可用解".to_string(),
+        };
+        self.solving_progress = progress.percent();
+        self.solving_frame = self.solving_frame.wrapping_add(1);
+    }
 }
 
 // ---------------------------------------------------------------------------

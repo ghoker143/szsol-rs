@@ -319,13 +319,39 @@ impl<R: Renderer> Game<R> {
                         self.renderer.show_solving();
                         self.renderer.render_header(self.save_data.total_wins(), self.board.seed);
                         self.renderer.render(&self.board);
-                        let result = crate::solver::solve(&self.board, |_| {});
+                        let board_snapshot = self.board.clone();
+                        let wins = self.save_data.total_wins();
+                        let seed = self.board.seed;
+                        let result = crate::solver::solve(&board_snapshot, |progress| {
+                            if ct_event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                                if let Ok(Event::Key(key)) = ct_event::read() {
+                                    use crossterm::event::{KeyCode, KeyModifiers};
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        match key.code {
+                                            KeyCode::Char('c') | KeyCode::Char('d') => {
+                                                self.should_quit = true;
+                                                return false;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            self.renderer.update_solving_progress(progress);
+                            self.renderer.render_header(wins, seed);
+                            self.renderer.render(&board_snapshot);
+                            true
+                        });
                         self.renderer.hide_solving();
+                        if self.should_quit {
+                            return;
+                        }
                         match result {
                             None => {
                                 self.renderer.error("No solution found for current board.");
                             }
-                            Some(path) => {
+                            Some(solution) => {
+                                let path: Vec<_> = solution.iter().map(|step| step.next_move).collect();
                                 let n = path.len();
                                 self.renderer.set_hint_steps(path);
                                 self.renderer.info(&format!("Hint active: {} step(s). Green = next card. H to exit.", n));
@@ -858,8 +884,12 @@ impl<R: Renderer> Game<R> {
             }
             Command::Solve => {
                 self.renderer.info("Running A* solver... (may take a moment)");
-                
-                if let Some(path) = crate::solver::solve(&self.board, |s| println!("{}", s)) {
+
+                if let Some(path) = crate::solver::solve(&self.board, |progress| {
+                    self.renderer.info(&progress.message());
+                    true
+                }) {
+                    let path: Vec<_> = path.iter().map(|step| step.next_move).collect();
                     self.renderer.info(&format!("Found a solution in {} steps!", path.len()));
                     for (i, m) in path.iter().enumerate() {
                         self.renderer.info(&format!("{:4}. {}", i + 1, m.to_command_str()));
